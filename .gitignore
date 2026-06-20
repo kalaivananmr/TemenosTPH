@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Sensitive files
+temenos_session.json
+storage_state.json
+.env
+*.env
+
+# Generated databases (rebuild from chunks.jsonl)
+rag/chroma_db/
+temenos_chroma_db/
+
+# Crawl state (not needed in repo)
+temenos_visited.txt
+scrape_progress.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Offline HTML (too large, regenerate with webscraping/scraper.py)
+webscraping/offline/
