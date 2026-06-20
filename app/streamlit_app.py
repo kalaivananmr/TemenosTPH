@@ -52,14 +52,7 @@ MODE_PROMPTS = {
         "IMPORTANT: If the context does not contain specific information "
         "to answer the question, you MUST say so. Do NOT guess or infer."
     ),
-    "Solution Provider": (
-        "You are a Temenos Payments Hub solution architect. "
-        "Map requirements to specific TPH modules and clearing options. "
-        "Use ONLY the provided documentation context. "
-        "IMPORTANT: If the context does not cover the specific clearing/country "
-        "asked about, say the information is not available. Do NOT substitute "
-        "information from a different clearing or country."
-    ),
+    "Solution Provider": "SOLUTION_PROVIDER_MULTI_STEP",
     "Core Fitment Assessor": (
         "You are a Temenos Payments Hub core fitment assessor. "
         "Produce a fitment table: Requirement | TPH Feature | Fit (Full/Partial/Gap). "
@@ -288,6 +281,127 @@ def stream_groq_response(client, system_prompt, context, question):
             yield text
 
 
+SOLUTION_DISCOVERY_PROMPT = (
+    "You are a Temenos Payments Hub (TPH) payment architect analyzing a client requirement.\n\n"
+    "Your task: Based on the user's requirement, generate 3-5 specific search queries "
+    "to find ALL relevant TPH capabilities, modules, clearing systems, and configurations "
+    "that could be part of the solution.\n\n"
+    "Think about:\n"
+    "- Which payment order types are involved (PI, DB, PP)?\n"
+    "- Which clearing/settlement systems are needed?\n"
+    "- What configuration or setup is required?\n"
+    "- What processing flows (inward, outward, returns) apply?\n"
+    "- What integration points exist?\n\n"
+    "Respond with ONLY a JSON array of search queries, no other text:\n"
+    '["query 1", "query 2", "query 3"]\n'
+)
+
+SOLUTION_ARCHITECT_PROMPT = (
+    "You are a senior Temenos Payments Hub (TPH) payment architect and solution consultant.\n\n"
+    "You have been given a client requirement AND the relevant TPH documentation gathered "
+    "by your research team. Your job is to design a complete solution.\n\n"
+    "APPROACH:\n"
+    "1. ANALYZE the requirement — break it down into functional components\n"
+    "2. MAP each component to specific TPH modules, payment types, and clearings from the documentation\n"
+    "3. IDENTIFY the end-to-end flow — from initiation to settlement\n"
+    "4. FLAG any gaps where the documentation shows TPH doesn't cover the requirement\n"
+    "5. ASK clarifying questions if the requirement is ambiguous\n\n"
+    "RESPONSE FORMAT:\n\n"
+    "### Requirement Analysis\n"
+    "Break down what the client needs.\n\n"
+    "### Proposed Solution\n"
+    "For each component, specify:\n"
+    "- **TPH Module**: Exact module/application name from docs\n"
+    "- **Payment Type**: PI, DB, PP, etc.\n"
+    "- **Clearing System**: SWIFT, SEPA, FPS, etc.\n"
+    "- **Configuration**: Key parameters or setup needed\n"
+    "- **Processing Flow**: Inward/Outward/Return flow\n\n"
+    "### End-to-End Flow\n"
+    "Step-by-step flow from initiation to completion.\n\n"
+    "### Gaps & Considerations\n"
+    "What the documentation does NOT cover or where customization is needed.\n\n"
+    "### Clarifying Questions (if any)\n"
+    "Questions you need answered to refine the solution.\n\n"
+    "RULES:\n"
+    "- ONLY propose features that are documented in the provided context\n"
+    "- If a component has NO documentation available, say so explicitly\n"
+    "- Cite which document each recommendation comes from\n"
+    "- Think like an architect — consider integration, data flow, and dependencies\n"
+)
+
+
+def solution_provider_flow(client, model, chunks, embeddings, search_texts, question):
+    with st.status("🔍 Discovery Agent — analyzing requirement...", expanded=True) as status:
+        st.write("Breaking down your requirement into search queries...")
+
+        discovery_response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SOLUTION_DISCOVERY_PROMPT},
+                {"role": "user", "content": f"Client requirement: {question}"},
+            ],
+            temperature=0.1,
+            max_tokens=500,
+        )
+
+        search_queries_text = discovery_response.choices[0].message.content.strip()
+        try:
+            if "```" in search_queries_text:
+                search_queries_text = search_queries_text.split("```")[1].replace("json", "").strip()
+            search_queries = json.loads(search_queries_text)
+        except (json.JSONDecodeError, IndexError):
+            search_queries = [question]
+
+        st.write(f"Searching documentation with {len(search_queries)} targeted queries...")
+        for i, q in enumerate(search_queries):
+            st.write(f"  {i+1}. {q}")
+
+        status.update(label="🔍 Discovery Agent — gathering documentation...", state="running")
+
+        all_contexts = []
+        all_sources = []
+        seen_chunks = set()
+
+        for sq in search_queries:
+            ctx, srcs = retrieve_context(model, chunks, embeddings, search_texts, sq, top_k=5)
+            if ctx:
+                for chunk_text in ctx.split("\n\n---\n\n"):
+                    chunk_hash = hash(chunk_text[:100])
+                    if chunk_hash not in seen_chunks:
+                        seen_chunks.add(chunk_hash)
+                        all_contexts.append(chunk_text)
+                for src in srcs:
+                    if src["url"] not in [s["url"] for s in all_sources]:
+                        all_sources.append(src)
+
+        if not all_contexts:
+            status.update(label="❌ No relevant documentation found", state="error")
+            return None, []
+
+        combined_context = "\n\n---\n\n".join(all_contexts[:15])
+
+        status.update(
+            label=f"✅ Discovery complete — found {len(all_contexts)} relevant sections from {len(all_sources)} documents",
+            state="complete",
+        )
+
+    with st.status("🛡️ Validator Agent — verifying relevance...", expanded=False) as status:
+        is_relevant, reason = validate_context(client, combined_context, question)
+        if is_relevant:
+            status.update(label=f"✅ Validated: {reason}", state="complete")
+        else:
+            status.update(label=f"❌ Rejected: {reason}", state="error")
+            return None, []
+
+    st.write("🏗️ **Solution Architect Agent** — designing solution...")
+
+    response = st.write_stream(
+        stream_groq_response(client, SOLUTION_ARCHITECT_PROMPT, combined_context, question)
+    )
+
+    return response, all_sources
+
+
 def main():
     st.set_page_config(
         page_title="Temenos TPH Consultant",
@@ -308,13 +422,15 @@ def main():
         st.markdown("""
         **Modes:**
         - 🔍 **Consultant** — Answer TPH queries
-        - 🏗️ **Solution** — Map requirements to TPH
+        - 🏗️ **Solution** — Multi-agent architecture
         - 📊 **Fitment** — Assess TPH fit
         - 🧪 **Test Cases** — Generate test scenarios
 
         **Agents:**
         - 🛡️ **Validator** — Checks context relevance
         - 💬 **Responder** — Generates verified answer
+        - 🔍 **Discovery** — Broad capability search *(Solution mode)*
+        - 🏗️ **Architect** — Designs end-to-end solution *(Solution mode)*
         """)
 
     with st.spinner("Loading knowledge base (first time takes ~1 min)..."):
@@ -335,50 +451,72 @@ def main():
         with st.chat_message("user"):
             st.markdown(question)
 
-        context, sources = retrieve_context(model, chunks, embeddings, search_texts, question)
-
-        if context is None:
-            with st.chat_message("assistant"):
-                st.markdown(NO_INFO_MSG)
-            st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
-            return
-
         client = get_groq_client()
 
-        with st.chat_message("assistant"):
-            with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
-                is_relevant, reason = validate_context(client, context, question)
-                if is_relevant:
-                    status.update(label=f"✅ Validated: {reason}", state="complete")
+        if mode == "Solution Provider":
+            with st.chat_message("assistant"):
+                response, sources = solution_provider_flow(
+                    client, model, chunks, embeddings, search_texts, question
+                )
+                if response is None:
+                    st.markdown(NO_INFO_MSG)
+                    st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
                 else:
-                    status.update(label=f"❌ Rejected: {reason}", state="error")
+                    if sources:
+                        st.markdown("---")
+                        st.markdown("**📄 Documentation Referenced:**")
+                        for src in sources[:8]:
+                            if src["url"]:
+                                st.markdown(f"- [{src['title']}]({src['url']})")
+                            else:
+                                st.markdown(f"- {src['title']}")
+                    source_text = ""
+                    if sources:
+                        source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:8])
+                    st.session_state.messages.append({"role": "assistant", "content": response + source_text})
+        else:
+            context, sources = retrieve_context(model, chunks, embeddings, search_texts, question)
 
-            if not is_relevant:
-                rejection_msg = (
-                    f"**No information available.**\n\n"
-                    f"🛡️ **Validator Agent:** {reason}\n\n"
-                    f"The retrieved documentation does not contain specific information "
-                    f"to answer your question. Try rephrasing with exact Temenos terminology."
-                )
-                st.markdown(rejection_msg)
-                st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
-            else:
-                response = st.write_stream(
-                    stream_groq_response(client, MODE_PROMPTS[mode], context, question)
-                )
-                if sources:
-                    st.markdown("---")
-                    st.markdown("**📄 Sources:**")
-                    for src in sources[:5]:
-                        if src["url"]:
-                            st.markdown(f"- [{src['title']}]({src['url']}) ({src['score']:.0%})")
-                        else:
-                            st.markdown(f"- {src['title']} ({src['score']:.0%})")
+            if context is None:
+                with st.chat_message("assistant"):
+                    st.markdown(NO_INFO_MSG)
+                st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
+                return
 
-                source_text = ""
-                if sources:
-                    source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:5])
-                st.session_state.messages.append({"role": "assistant", "content": response + source_text})
+            with st.chat_message("assistant"):
+                with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
+                    is_relevant, reason = validate_context(client, context, question)
+                    if is_relevant:
+                        status.update(label=f"✅ Validated: {reason}", state="complete")
+                    else:
+                        status.update(label=f"❌ Rejected: {reason}", state="error")
+
+                if not is_relevant:
+                    rejection_msg = (
+                        f"**No information available.**\n\n"
+                        f"🛡️ **Validator Agent:** {reason}\n\n"
+                        f"The retrieved documentation does not contain specific information "
+                        f"to answer your question. Try rephrasing with exact Temenos terminology."
+                    )
+                    st.markdown(rejection_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
+                else:
+                    response = st.write_stream(
+                        stream_groq_response(client, MODE_PROMPTS[mode], context, question)
+                    )
+                    if sources:
+                        st.markdown("---")
+                        st.markdown("**📄 Sources:**")
+                        for src in sources[:5]:
+                            if src["url"]:
+                                st.markdown(f"- [{src['title']}]({src['url']}) ({src['score']:.0%})")
+                            else:
+                                st.markdown(f"- {src['title']} ({src['score']:.0%})")
+
+                    source_text = ""
+                    if sources:
+                        source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:5])
+                    st.session_state.messages.append({"role": "assistant", "content": response + source_text})
 
 
 if __name__ == "__main__":
