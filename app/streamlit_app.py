@@ -5,12 +5,27 @@ Uses in-memory vector search (no ChromaDB) for maximum compatibility.
 
 import json
 import os
+import re
 import numpy as np
 import streamlit as st
 from pathlib import Path
 
 CHUNKS_FILE = Path(__file__).parent.parent / "rag" / "chunks.jsonl"
-TOP_K = 5
+TOP_K = 8
+
+STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must", "to", "of",
+    "in", "for", "on", "with", "at", "by", "from", "as", "into", "about",
+    "it", "its", "this", "that", "these", "those", "what", "which", "how",
+    "when", "where", "who", "whom", "why", "and", "or", "but", "not", "no",
+    "all", "each", "any", "both", "few", "more", "most", "some", "such",
+    "than", "too", "very", "just", "also", "me", "my", "we", "our", "you",
+    "your", "i", "provide", "generate", "create", "give", "show", "list",
+    "explain", "describe", "tell", "write", "make", "find", "get", "use",
+    "test", "cases", "case", "work", "works", "working", "does",
+}
 
 MODE_PROMPTS = {
     "Payment Consultant": (
@@ -46,6 +61,15 @@ MODE_PROMPTS = {
 }
 
 
+def extract_key_terms(query):
+    words = re.findall(r'[a-zA-Z0-9_\-/]+', query)
+    terms = []
+    for w in words:
+        if w.lower() not in STOP_WORDS and len(w) >= 2:
+            terms.append(w.lower())
+    return terms
+
+
 @st.cache_resource
 def load_knowledge_base():
     from sentence_transformers import SentenceTransformer
@@ -67,25 +91,58 @@ def load_knowledge_base():
     norms[norms == 0] = 1
     embeddings = embeddings / norms
 
-    return model, chunks, embeddings
+    search_texts = []
+    for c in chunks:
+        combined = " ".join([
+            c.get("content", ""),
+            c.get("title", ""),
+            c.get("section", ""),
+            c.get("breadcrumbs", ""),
+        ]).lower()
+        search_texts.append(combined)
+
+    return model, chunks, embeddings, search_texts
 
 
-def retrieve_context(model, chunks, embeddings, query, top_k=TOP_K):
+def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K):
+    key_terms = extract_key_terms(query)
+
     query_emb = model.encode([query])
     query_emb = np.array(query_emb, dtype=np.float32)
     query_norm = np.linalg.norm(query_emb)
     if query_norm > 0:
         query_emb = query_emb / query_norm
 
-    scores = np.dot(embeddings, query_emb.T).flatten()
-    top_indices = np.argsort(scores)[::-1][:top_k]
+    semantic_scores = np.dot(embeddings, query_emb.T).flatten()
+
+    keyword_scores = np.zeros(len(chunks), dtype=np.float32)
+    if key_terms:
+        for i, text in enumerate(search_texts):
+            matches = sum(1 for term in key_terms if term in text)
+            keyword_scores[i] = matches / len(key_terms)
+
+    if key_terms:
+        final_scores = semantic_scores * 0.5 + keyword_scores * 0.5
+    else:
+        final_scores = semantic_scores
+
+    candidate_count = top_k * 4
+    top_indices = np.argsort(final_scores)[::-1][:candidate_count]
+
+    results = []
+    for idx in top_indices:
+        if final_scores[idx] < 0.3:
+            continue
+        results.append((idx, final_scores[idx], semantic_scores[idx], keyword_scores[idx]))
+
+    if key_terms:
+        results.sort(key=lambda r: (r[3] > 0, r[1]), reverse=True)
+
+    results = results[:top_k]
 
     contexts = []
     sources = []
-    for idx in top_indices:
-        score = scores[idx]
-        if score < 0.25:
-            continue
+    for idx, score, sem_score, kw_score in results:
         chunk = chunks[idx]
         title = chunk.get("title", "")
         section = chunk.get("section", "")
@@ -161,7 +218,7 @@ def main():
         """)
 
     with st.spinner("Loading knowledge base (first time takes ~1 min)..."):
-        model, chunks, embeddings = load_knowledge_base()
+        model, chunks, embeddings, search_texts = load_knowledge_base()
 
     with st.sidebar:
         st.markdown(f"📚 **{len(chunks):,}** document chunks loaded")
@@ -178,7 +235,7 @@ def main():
         with st.chat_message("user"):
             st.markdown(question)
 
-        context, sources = retrieve_context(model, chunks, embeddings, question)
+        context, sources = retrieve_context(model, chunks, embeddings, search_texts, question)
 
         if context is None:
             response = "No relevant documents found. Try rephrasing or asking about a different TPH topic."
