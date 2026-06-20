@@ -27,6 +27,20 @@ STOP_WORDS = {
     "test", "cases", "case", "work", "works", "working", "does",
 }
 
+SYNONYMS = {
+    "indian": "india", "american": "united states", "usa": "united states",
+    "us": "united states", "british": "united kingdom", "uk": "united kingdom",
+    "sri lankan": "sri lanka", "australian": "australia", "european": "europe",
+    "argentinian": "argentina", "argentine": "argentina",
+    "hong kong": "hongkong", "hk": "hongkong",
+    "israeli": "israel", "african": "africa", "tunisian": "tunisia",
+    "lebanese": "lebanon", "nordic": "nordic", "spanish": "iberpay",
+    "swiss": "sic", "german": "equens",
+    "ct": "credit transfer", "dd": "direct debit",
+    "fps": "faster payments", "ips": "instant payments",
+    "inward": "inward", "outward": "outward",
+}
+
 MODE_PROMPTS = {
     "Payment Consultant": (
         "You are a Temenos Payments Hub (TPH) expert consultant. "
@@ -62,12 +76,32 @@ MODE_PROMPTS = {
 
 
 def extract_key_terms(query):
-    words = re.findall(r'[a-zA-Z0-9_\-/]+', query)
+    query_lower = query.lower()
+    for phrase, replacement in SYNONYMS.items():
+        if phrase in query_lower:
+            query_lower = query_lower.replace(phrase, f"{phrase} {replacement}")
+
+    words = re.findall(r'[a-zA-Z0-9_\-/]+', query_lower)
     terms = []
+    seen = set()
     for w in words:
-        if w.lower() not in STOP_WORDS and len(w) >= 2:
-            terms.append(w.lower())
+        if w not in STOP_WORDS and len(w) >= 2 and w not in seen:
+            terms.append(w)
+            seen.add(w)
     return terms
+
+
+def keyword_match_score(terms, text):
+    if not terms:
+        return 0.0
+    score = 0.0
+    for term in terms:
+        if term in text:
+            score += 1.0
+        elif len(term) >= 4:
+            if any(term in word or word in term for word in text.split()):
+                score += 0.5
+    return score / len(terms)
 
 
 @st.cache_resource
@@ -98,6 +132,8 @@ def load_knowledge_base():
             c.get("title", ""),
             c.get("section", ""),
             c.get("breadcrumbs", ""),
+            c.get("doc_id", "").replace("__", " ").replace("_", " "),
+            c.get("source_url", "").replace("/", " ").replace("_", " "),
         ]).lower()
         search_texts.append(combined)
 
@@ -118,15 +154,14 @@ def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K
     keyword_scores = np.zeros(len(chunks), dtype=np.float32)
     if key_terms:
         for i, text in enumerate(search_texts):
-            matches = sum(1 for term in key_terms if term in text)
-            keyword_scores[i] = matches / len(key_terms)
+            keyword_scores[i] = keyword_match_score(key_terms, text)
 
     if key_terms:
-        final_scores = semantic_scores * 0.5 + keyword_scores * 0.5
+        final_scores = semantic_scores * 0.4 + keyword_scores * 0.6
     else:
         final_scores = semantic_scores
 
-    candidate_count = top_k * 4
+    candidate_count = top_k * 5
     top_indices = np.argsort(final_scores)[::-1][:candidate_count]
 
     results = []
@@ -136,7 +171,10 @@ def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K
         results.append((idx, final_scores[idx], semantic_scores[idx], keyword_scores[idx]))
 
     if key_terms:
-        results.sort(key=lambda r: (r[3] > 0, r[1]), reverse=True)
+        has_full_match = any(r[3] >= 0.8 for r in results)
+        if has_full_match:
+            results = [r for r in results if r[3] >= 0.5]
+        results.sort(key=lambda r: (r[3], r[1]), reverse=True)
 
     results = results[:top_k]
 
