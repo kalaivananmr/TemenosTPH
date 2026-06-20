@@ -1,20 +1,16 @@
 """
 Temenos Payments Hub — Agentic RAG Consultant (Streamlit + Groq)
-Cloud-deployable version using Groq API for fast inference.
+Uses in-memory vector search (no ChromaDB) for maximum compatibility.
 """
 
 import json
 import os
-import sys
+import numpy as np
 import streamlit as st
 from pathlib import Path
 
 CHUNKS_FILE = Path(__file__).parent.parent / "rag" / "chunks.jsonl"
-CHROMA_DIR = Path(__file__).parent.parent / "rag" / "chroma_db"
-COLLECTION_NAME = "temenos_payments"
-EMBED_MODEL = "all-MiniLM-L6-v2"
 TOP_K = 5
-RELEVANCE_THRESHOLD = 1.2
 
 MODE_PROMPTS = {
     "Payment Consultant": (
@@ -51,75 +47,56 @@ MODE_PROMPTS = {
 
 
 @st.cache_resource
-def load_collection():
-    import chromadb
-    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+def load_knowledge_base():
+    from sentence_transformers import SentenceTransformer
 
-    embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    existing = [c.name for c in client.list_collections()]
-    if COLLECTION_NAME not in existing:
-        st.info("First run — indexing documents. This takes ~1 minute...")
-        collection = client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            embedding_function=embed_fn,
-            metadata={"hnsw:space": "cosine"},
-        )
-        chunks = []
-        with open(CHUNKS_FILE, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    chunks.append(json.loads(line))
+    chunks = []
+    with open(CHUNKS_FILE, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                chunks.append(json.loads(line))
 
-        batch_size = 500
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            ids = [c["id"] for c in batch]
-            documents = [c["content"] for c in batch]
-            metadatas = [
-                {
-                    "doc_id": c["doc_id"],
-                    "title": c["title"],
-                    "section": c.get("section", ""),
-                    "source_url": c.get("source_url", ""),
-                    "chunk_index": c["chunk_index"],
-                    "total_chunks": c["total_chunks"],
-                }
-                for c in batch
-            ]
-            collection.add(ids=ids, documents=documents, metadatas=metadatas)
-        return collection
-    else:
-        return client.get_collection(name=COLLECTION_NAME, embedding_function=embed_fn)
+    texts = [c["content"] for c in chunks]
+    embeddings = model.encode(texts, show_progress_bar=False, batch_size=128)
+    embeddings = np.array(embeddings, dtype=np.float32)
+
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    embeddings = embeddings / norms
+
+    return model, chunks, embeddings
 
 
-def retrieve_context(collection, query):
-    results = collection.query(
-        query_texts=[query],
-        n_results=TOP_K,
-        include=["documents", "metadatas", "distances"],
-    )
+def retrieve_context(model, chunks, embeddings, query, top_k=TOP_K):
+    query_emb = model.encode([query])
+    query_emb = np.array(query_emb, dtype=np.float32)
+    query_norm = np.linalg.norm(query_emb)
+    if query_norm > 0:
+        query_emb = query_emb / query_norm
+
+    scores = np.dot(embeddings, query_emb.T).flatten()
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
     contexts = []
     sources = []
-    distances = results.get("distances", [[]])[0]
-
-    for i, doc in enumerate(results["documents"][0]):
-        dist = distances[i] if i < len(distances) else 999
-        if dist > RELEVANCE_THRESHOLD:
+    for idx in top_indices:
+        score = scores[idx]
+        if score < 0.25:
             continue
-        meta = results["metadatas"][0][i]
-        title = meta.get("title", "")
-        section = meta.get("section", "")
-        url = meta.get("source_url", "")
+        chunk = chunks[idx]
+        title = chunk.get("title", "")
+        section = chunk.get("section", "")
+        url = chunk.get("source_url", "")
         header = f"[{title}"
         if section:
             header += f" > {section}"
-        header += "]"
-        contexts.append(f"{header}\n{doc}")
+        header += f"] (relevance: {score:.0%})"
+        contexts.append(f"{header}\n{chunk['content']}")
         if url:
-            sources.append({"title": title, "url": url})
+            sources.append({"title": title, "url": url, "score": float(score)})
 
     if not contexts:
         return None, []
@@ -128,9 +105,14 @@ def retrieve_context(collection, query):
 
 def get_groq_client():
     from groq import Groq
-    api_key = os.environ.get("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
+    api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        st.error("GROQ_API_KEY not set. Add it in Settings > Secrets on Streamlit Cloud.")
+        try:
+            api_key = st.secrets["GROQ_API_KEY"]
+        except Exception:
+            api_key = ""
+    if not api_key:
+        st.error("GROQ_API_KEY not set. Add it in Streamlit Cloud: Settings > Secrets.")
         st.stop()
     return Groq(api_key=api_key)
 
@@ -169,21 +151,20 @@ def main():
             list(MODE_PROMPTS.keys()),
             index=0,
         )
-
         st.markdown("---")
-        st.markdown(f"**Active mode:** {mode}")
         st.markdown("""
         **Modes:**
         - 🔍 **Consultant** — Answer TPH queries
         - 🏗️ **Solution** — Map requirements to TPH
-        - 📊 **Fitment** — Assess TPH fit vs requirements
+        - 📊 **Fitment** — Assess TPH fit
         - 🧪 **Test Cases** — Generate test scenarios
         """)
 
-    collection = load_collection()
+    with st.spinner("Loading knowledge base (first time takes ~1 min)..."):
+        model, chunks, embeddings = load_knowledge_base()
 
     with st.sidebar:
-        st.markdown(f"📚 **{collection.count():,}** document chunks indexed")
+        st.markdown(f"📚 **{len(chunks):,}** document chunks loaded")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -197,10 +178,10 @@ def main():
         with st.chat_message("user"):
             st.markdown(question)
 
-        context, sources = retrieve_context(collection, question)
+        context, sources = retrieve_context(model, chunks, embeddings, question)
 
         if context is None:
-            response = "No relevant documents found for this query. Try rephrasing or asking about a different TPH topic."
+            response = "No relevant documents found. Try rephrasing or asking about a different TPH topic."
             with st.chat_message("assistant"):
                 st.markdown(response)
             st.session_state.messages.append({"role": "assistant", "content": response})
@@ -210,15 +191,14 @@ def main():
                 response = st.write_stream(
                     stream_groq_response(client, MODE_PROMPTS[mode], context, question)
                 )
-
                 if sources:
                     st.markdown("---")
                     st.markdown("**📄 Sources:**")
                     for src in sources[:5]:
                         if src["url"]:
-                            st.markdown(f"- [{src['title']}]({src['url']})")
+                            st.markdown(f"- [{src['title']}]({src['url']}) ({src['score']:.0%})")
                         else:
-                            st.markdown(f"- {src['title']}")
+                            st.markdown(f"- {src['title']} ({src['score']:.0%})")
 
             source_text = ""
             if sources:
