@@ -28,6 +28,13 @@ STOP_WORDS = {
     "explain", "describe", "tell", "write", "make", "find", "get", "use",
     "test", "cases", "case", "work", "works", "working", "does",
     "temenos", "tph", "payments", "hub", "payment",
+    "possible", "using", "different", "used", "like", "want", "new",
+    "based", "through", "between", "within", "after", "before",
+    "specific", "available", "required", "related", "existing",
+    "able", "allow", "allows", "process", "system", "support",
+    "way", "type", "types", "set", "setting", "settings",
+    "please", "help", "know", "understand", "check", "look",
+    "want", "need", "try", "run", "start", "stop", "enable",
 }
 
 SYNONYMS = {
@@ -135,9 +142,11 @@ NO_INFO_MSG = (
 
 def extract_key_terms(query):
     query_lower = query.lower()
+
     for phrase, replacement in SYNONYMS.items():
-        if phrase in query_lower:
-            query_lower = query_lower.replace(phrase, f"{phrase} {replacement}")
+        pattern = r'\b' + re.escape(phrase) + r'\b'
+        if re.search(pattern, query_lower):
+            query_lower = re.sub(pattern, f"{phrase} {replacement}", query_lower)
 
     words = re.findall(r'[a-zA-Z0-9_\-/]+', query_lower)
     terms = []
@@ -229,7 +238,13 @@ def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K
         results.append((idx, final_scores[idx], semantic_scores[idx], keyword_scores[idx]))
 
     if key_terms:
-        results = [r for r in results if r[3] >= MIN_KEYWORD_MATCH]
+        if len(key_terms) <= 3:
+            min_match = MIN_KEYWORD_MATCH
+        elif len(key_terms) <= 6:
+            min_match = 0.5
+        else:
+            min_match = 0.4
+        results = [r for r in results if r[3] >= min_match]
         results.sort(key=lambda r: (r[3], r[1]), reverse=True)
 
     results = results[:top_k]
