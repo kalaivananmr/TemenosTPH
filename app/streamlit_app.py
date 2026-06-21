@@ -7,6 +7,7 @@ Response Agent generates answer only if context is verified.
 import json
 import os
 import re
+import time
 import numpy as np
 import streamlit as st
 from pathlib import Path
@@ -394,6 +395,24 @@ def get_llm_client():
     return api_key, provider
 
 
+def _gemini_call_with_retry(model_obj, user_prompt, config, stream=False, max_retries=3):
+    import google.generativeai as genai
+    for attempt in range(max_retries):
+        try:
+            if stream:
+                return model_obj.generate_content(user_prompt, generation_config=config, stream=True)
+            else:
+                return model_obj.generate_content(user_prompt, generation_config=config)
+        except Exception as e:
+            if "ResourceExhausted" in type(e).__name__ or "429" in str(e):
+                wait = 5 * (attempt + 1)
+                time.sleep(wait)
+                if attempt == max_retries - 1:
+                    raise
+            else:
+                raise
+
+
 def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=False):
     if provider == "gemini":
         import google.generativeai as genai
@@ -402,26 +421,17 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
             "gemini-2.0-flash",
             system_instruction=system_prompt,
         )
+        config = genai.types.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
         if stream:
-            response = model.generate_content(
-                user_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens,
-                ),
-                stream=True,
-            )
+            response = _gemini_call_with_retry(model, user_prompt, config, stream=True)
             for chunk in response:
                 if chunk.text:
                     yield chunk.text
         else:
-            response = model.generate_content(
-                user_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens,
-                ),
-            )
+            response = _gemini_call_with_retry(model, user_prompt, config, stream=False)
             yield response.text
     else:
         from groq import Groq
@@ -676,9 +686,6 @@ def main():
 
     with st.sidebar:
         st.markdown(f"📚 **{len(chunks):,}** document chunks loaded")
-        api_key_check, provider_check = get_llm_client()
-        provider_label = "Google Gemini 2.0 Flash" if provider_check == "gemini" else "Groq LLaMA 3.1"
-        st.markdown(f"🤖 **LLM:** {provider_label}")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
