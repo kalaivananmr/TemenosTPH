@@ -395,71 +395,116 @@ def get_llm_client():
     return api_key, provider
 
 
-def _gemini_call_with_retry(model_obj, user_prompt, config, stream=False, max_retries=3):
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",
+]
+
+
+def _try_gemini(api_key, system_prompt, user_prompt, temperature, max_tokens, stream):
     import google.generativeai as genai
-    for attempt in range(max_retries):
+    genai.configure(api_key=api_key)
+    config = genai.types.GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)
+
+    last_error = None
+    for model_name in GEMINI_MODELS:
         try:
+            model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
             if stream:
-                return model_obj.generate_content(user_prompt, generation_config=config, stream=True)
+                response = model.generate_content(user_prompt, generation_config=config, stream=True)
+                return response, model_name
             else:
-                return model_obj.generate_content(user_prompt, generation_config=config)
+                response = model.generate_content(user_prompt, generation_config=config)
+                return response, model_name
         except Exception as e:
-            if "ResourceExhausted" in type(e).__name__ or "429" in str(e):
-                wait = 5 * (attempt + 1)
-                time.sleep(wait)
-                if attempt == max_retries - 1:
-                    raise
+            last_error = e
+            err_str = str(e)
+            if "ResourceExhausted" in type(e).__name__ or "429" in err_str or "quota" in err_str.lower():
+                continue
             else:
                 raise
+    raise last_error
+
+
+def _try_groq(api_key, system_prompt, user_prompt, temperature, max_tokens, stream):
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt[:3500]},
+    ]
+    if stream:
+        return client.chat.completions.create(
+            model="llama-3.1-8b-instant", messages=messages,
+            temperature=temperature, max_tokens=max_tokens, stream=True,
+        )
+    else:
+        return client.chat.completions.create(
+            model="llama-3.1-8b-instant", messages=messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
 
 
 def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=False):
-    if provider == "gemini":
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            system_instruction=system_prompt,
-        )
-        config = genai.types.GenerationConfig(
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-        )
-        if stream:
-            response = _gemini_call_with_retry(model, user_prompt, config, stream=True)
-            for chunk in response:
-                if chunk.text:
-                    yield chunk.text
-        else:
-            response = _gemini_call_with_retry(model, user_prompt, config, stream=False)
-            yield response.text
-    else:
-        from groq import Groq
-        client = Groq(api_key=api_key)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        if stream:
-            resp = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-            )
-            for chunk in resp:
-                text = chunk.choices[0].delta.content
-                if text:
-                    yield text
-        else:
-            resp = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            yield resp.choices[0].message.content
+    gemini_key = ""
+    groq_key = ""
+    for key_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"]:
+        k = os.environ.get(key_name, "")
+        if not k:
+            try:
+                k = st.secrets[key_name]
+            except Exception:
+                pass
+        if k:
+            gemini_key = k
+            break
+    for key_name in ["GROQ_API_KEY"]:
+        k = os.environ.get(key_name, "")
+        if not k:
+            try:
+                k = st.secrets[key_name]
+            except Exception:
+                pass
+        if k:
+            groq_key = k
+            break
+
+    errors = []
+
+    if gemini_key:
+        try:
+            if stream:
+                response, used_model = _try_gemini(gemini_key, system_prompt, user_prompt, temperature, max_tokens, True)
+                for chunk in response:
+                    if chunk.text:
+                        yield chunk.text
+                return
+            else:
+                response, used_model = _try_gemini(gemini_key, system_prompt, user_prompt, temperature, max_tokens, False)
+                yield response.text
+                return
+        except Exception as e:
+            errors.append(f"Gemini: {e}")
+
+    if groq_key:
+        try:
+            if stream:
+                resp = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, True)
+                for chunk in resp:
+                    text = chunk.choices[0].delta.content
+                    if text:
+                        yield text
+                return
+            else:
+                resp = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, False)
+                yield resp.choices[0].message.content
+                return
+        except Exception as e:
+            errors.append(f"Groq: {e}")
+
+    error_detail = " | ".join(errors) if errors else "No API keys configured"
+    yield f"**All LLM providers exhausted.** Wait a few minutes and retry.\n\nDetails: {error_detail}"
 
 
 def call_llm_once(api_key, provider, system_prompt, user_prompt, temperature=0.0, max_tokens=500):
