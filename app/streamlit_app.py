@@ -150,6 +150,58 @@ VALIDATOR_PROMPT = (
     '- User asks "Indian NEFT", context has India NEFT clearing → {"relevant": true, "reason": "Context covers India NEFT clearing"}\n'
 )
 
+ORCHESTRATOR_PROMPT = (
+    "You are the Query Orchestrator for a Temenos Payments Hub (TPH) knowledge system.\n\n"
+    "Your job: Take the user's raw query and transform it into an optimized, "
+    "TPH-specific search that will get the best results from the documentation.\n\n"
+    "STEPS:\n"
+    "1. UNDERSTAND the user's intent — what are they really asking?\n"
+    "2. REWRITE the query using precise Temenos terminology:\n"
+    "   - Use correct module names: PI (Payment Initiation), DB (Debit Collection), "
+    "PP (Payments Hub), POR (Payment Order)\n"
+    "   - Use correct clearing names: SWIFT, SEPA, TARGET2, CHAPS, FPS, BACS, "
+    "NEFT, RTGS, FedNow, CEFTS, TIPS, SIC, etc.\n"
+    "   - Use correct process terms: inward, outward, credit transfer, direct debit, "
+    "standing order, bulk payment, cancellation, return, recall\n"
+    "   - Map country adjectives to Temenos paths: 'Indian' → 'India', 'British' → 'United Kingdom'\n"
+    "3. DETECT the best mode for this query:\n"
+    "   - 'consultant': factual questions, explanations, how-does-X-work\n"
+    "   - 'solution': requirement/need, 'we want to...', 'how to achieve...', design questions\n"
+    "   - 'fitment': assess, evaluate, compare, fit, gap analysis, capability check\n"
+    "   - 'testcase': test, QA, test cases, test scenarios, test steps, validate\n"
+    "4. GENERATE 2-3 focused search queries that will find the right documentation\n"
+    "5. ASSESS confidence (0-100) that the TPH documentation likely covers this topic\n\n"
+    "Respond with ONLY a JSON object (no markdown, no extra text):\n"
+    "{\n"
+    '  "original": "user\'s original query",\n'
+    '  "rewritten": "optimized TPH query",\n'
+    '  "intent": "consultant|solution|fitment|testcase",\n'
+    '  "search_queries": ["query1", "query2", "query3"],\n'
+    '  "confidence": 85,\n'
+    '  "reasoning": "one sentence explaining the classification"\n'
+    "}\n\n"
+    "EXAMPLES:\n"
+    '- "is it possible to capture collection requests cleared via domestic clearings DB"\n'
+    '  → rewritten: "Debit Collection (DB) application capturing collection requests for domestic clearings"\n'
+    '  → intent: "consultant", confidence: 90\n\n'
+    '- "we need cross-border payments with SWIFT gpi tracking"\n'
+    '  → rewritten: "SWIFT gpi cross-border credit transfer with tracker in Payments Hub (PP)"\n'
+    '  → intent: "solution", confidence: 85\n\n'
+    '- "can TPH handle SEPA instant payments and direct debits?"\n'
+    '  → rewritten: "SEPA Instant Payment and SEPA Direct Debit support in TPH"\n'
+    '  → intent: "fitment", confidence: 90\n\n'
+    '- "create test cases for outward SWIFT payment"\n'
+    '  → rewritten: "Outward SWIFT credit transfer payment processing workflow and screens"\n'
+    '  → intent: "testcase", confidence: 85\n'
+)
+
+INTENT_TO_MODE = {
+    "consultant": "Payment Consultant",
+    "solution": "Solution Provider",
+    "fitment": "Core Fitment Assessor",
+    "testcase": "Test Case Generator",
+}
+
 NO_INFO_MSG = (
     "**No information available.**\n\n"
     "The Temenos Payments Hub documentation in our knowledge base does not contain "
@@ -351,6 +403,43 @@ def stream_groq_response(client, system_prompt, context, question):
             yield text
 
 
+def run_orchestrator(client, question):
+    messages = [
+        {"role": "system", "content": ORCHESTRATOR_PROMPT},
+        {"role": "user", "content": question},
+    ]
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0.0,
+        max_tokens=500,
+    )
+    result_text = response.choices[0].message.content.strip()
+
+    try:
+        clean = result_text
+        if "```" in clean:
+            clean = clean.split("```")[1].replace("json", "").strip()
+        result = json.loads(clean)
+        return {
+            "original": result.get("original", question),
+            "rewritten": result.get("rewritten", question),
+            "intent": result.get("intent", "consultant"),
+            "search_queries": result.get("search_queries", [question]),
+            "confidence": result.get("confidence", 50),
+            "reasoning": result.get("reasoning", ""),
+        }
+    except (json.JSONDecodeError, IndexError):
+        return {
+            "original": question,
+            "rewritten": question,
+            "intent": "consultant",
+            "search_queries": [question],
+            "confidence": 50,
+            "reasoning": "Could not parse orchestrator response, defaulting to consultant mode",
+        }
+
+
 SOLUTION_DISCOVERY_PROMPT = (
     "You are a Temenos Payments Hub (TPH) payment architect analyzing a client requirement.\n\n"
     "Your task: Based on the user's requirement, generate 3-5 specific search queries "
@@ -497,24 +586,24 @@ def main():
 
     with st.sidebar:
         st.header("Mode")
-        mode = st.radio(
-            "Select consultant mode:",
-            list(MODE_PROMPTS.keys()),
+        mode_override = st.radio(
+            "Select mode (or let AI decide):",
+            ["Auto-detect"] + list(MODE_PROMPTS.keys()),
             index=0,
         )
         st.markdown("---")
         st.markdown("""
         **Modes:**
+        - 🤖 **Auto-detect** — AI picks the best mode
         - 🔍 **Consultant** — Answer TPH queries
         - 🏗️ **Solution** — Multi-agent architecture
         - 📊 **Fitment** — Assess TPH fit
         - 🧪 **Test Cases** — Generate test scenarios
 
-        **Agents:**
-        - 🛡️ **Validator** — Checks context relevance
-        - 💬 **Responder** — Generates verified answer
-        - 🔍 **Discovery** — Broad capability search *(Solution mode)*
-        - 🏗️ **Architect** — Designs end-to-end solution *(Solution mode)*
+        **Agent Pipeline:**
+        1. 🧠 **Orchestrator** — Rewrites query in TPH context, picks mode
+        2. 🛡️ **Validator** — Checks context relevance
+        3. 💬 **Responder** — Generates verified answer
         """)
 
     with st.spinner("Loading knowledge base (first time takes ~1 min)..."):
@@ -537,10 +626,53 @@ def main():
 
         client = get_groq_client()
 
-        if mode == "Solution Provider":
-            with st.chat_message("assistant"):
+        with st.chat_message("assistant"):
+
+            # === ORCHESTRATOR AGENT (always runs first) ===
+            with st.status("🧠 Orchestrator Agent — analyzing query...", expanded=True) as orch_status:
+                orch = run_orchestrator(client, question)
+                rewritten = orch["rewritten"]
+                confidence = orch["confidence"]
+                detected_intent = orch["intent"]
+                search_queries = orch["search_queries"]
+                reasoning = orch["reasoning"]
+
+                if mode_override == "Auto-detect":
+                    mode = INTENT_TO_MODE.get(detected_intent, "Payment Consultant")
+                else:
+                    mode = mode_override
+
+                st.write(f"**Rewritten query:** {rewritten}")
+                st.write(f"**Mode:** {mode} | **Confidence:** {confidence}%")
+                if reasoning:
+                    st.write(f"**Reasoning:** {reasoning}")
+
+                if confidence < 80:
+                    orch_status.update(
+                        label=f"⚠️ Low confidence ({confidence}%) — may not find relevant docs",
+                        state="error",
+                    )
+                    low_conf_msg = (
+                        f"**Low confidence ({confidence}%)** — the query may not match "
+                        f"available TPH documentation.\n\n"
+                        f"🧠 **Orchestrator:** {reasoning}\n\n"
+                        f"**Rewritten as:** {rewritten}\n\n"
+                        f"Try rephrasing with specific Temenos terminology "
+                        f"(module names, clearing systems, payment types)."
+                    )
+                    st.markdown(low_conf_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": low_conf_msg})
+                    st.stop()
+
+                orch_status.update(
+                    label=f"🧠 Orchestrator: {mode} mode | {confidence}% confidence",
+                    state="complete",
+                )
+
+            # === ROUTE TO MODE ===
+            if mode == "Solution Provider":
                 response, sources = solution_provider_flow(
-                    client, model, chunks, embeddings, search_texts, question
+                    client, model, chunks, embeddings, search_texts, rewritten
                 )
                 if response is None:
                     st.markdown(NO_INFO_MSG)
@@ -558,18 +690,33 @@ def main():
                     if sources:
                         source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:8])
                     st.session_state.messages.append({"role": "assistant", "content": response + source_text})
-        else:
-            context, sources = retrieve_context(model, chunks, embeddings, search_texts, question)
+            else:
+                # Use orchestrator's search queries for better retrieval
+                all_contexts = []
+                all_sources = []
+                seen = set()
+                for sq in search_queries:
+                    ctx, srcs = retrieve_context(model, chunks, embeddings, search_texts, sq, top_k=6)
+                    if ctx:
+                        for chunk_text in ctx.split("\n\n---\n\n"):
+                            h = hash(chunk_text[:100])
+                            if h not in seen:
+                                seen.add(h)
+                                all_contexts.append(chunk_text)
+                        for src in srcs:
+                            if src["url"] not in [s["url"] for s in all_sources]:
+                                all_sources.append(src)
 
-            if context is None:
-                with st.chat_message("assistant"):
+                if not all_contexts:
                     st.markdown(NO_INFO_MSG)
-                st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
-                return
+                    st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
+                    st.stop()
 
-            with st.chat_message("assistant"):
+                context = "\n\n---\n\n".join(all_contexts[:TOP_K])
+                sources = all_sources
+
                 with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
-                    is_relevant, reason = validate_context(client, context, question)
+                    is_relevant, reason = validate_context(client, context, rewritten)
                     if is_relevant:
                         status.update(label=f"✅ Validated: {reason}", state="complete")
                     else:
@@ -586,7 +733,7 @@ def main():
                     st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
                 else:
                     response = st.write_stream(
-                        stream_groq_response(client, MODE_PROMPTS[mode], context, question)
+                        stream_groq_response(client, MODE_PROMPTS[mode], context, rewritten)
                     )
                     if sources:
                         st.markdown("---")
