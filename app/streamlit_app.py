@@ -154,9 +154,20 @@ ORCHESTRATOR_PROMPT = (
     "You are the Query Orchestrator for a Temenos Payments Hub (TPH) knowledge system.\n\n"
     "Your job: Take the user's raw query and transform it into an optimized, "
     "TPH-specific search that will get the best results from the documentation.\n\n"
+    "IMPORTANT — DOCUMENT DETECTION:\n"
+    "If the user's input contains a REQUIREMENT DOCUMENT, BRD, specification, or detailed "
+    "interface description (signs: numbered sections, step-by-step flows, in-scope/out-of-scope, "
+    "API specifications, integration details, long structured text), then:\n"
+    "- Set has_document: true\n"
+    "- The document IS the primary context — do NOT search RAG for the external system name\n"
+    "- Instead, extract the TPH-relevant concepts from the document (payment initiation, "
+    "fund transfer, API integration, transaction processing, reversal, timeout handling, etc.)\n"
+    "- Generate search queries for those TPH CONCEPTS, not the external system name\n"
+    "- Confidence should be HIGH (85+) because the user provided their own context\n\n"
     "STEPS:\n"
     "1. UNDERSTAND the user's intent — what are they really asking?\n"
-    "2. REWRITE the query using precise Temenos terminology:\n"
+    "2. CHECK if user provided a document/requirement (has_document)\n"
+    "3. REWRITE the query using precise Temenos terminology:\n"
     "   - Use correct module names: PI (Payment Initiation), DB (Debit Collection), "
     "PP (Payments Hub), POR (Payment Order)\n"
     "   - Use correct clearing names: SWIFT, SEPA, TARGET2, CHAPS, FPS, BACS, "
@@ -164,35 +175,41 @@ ORCHESTRATOR_PROMPT = (
     "   - Use correct process terms: inward, outward, credit transfer, direct debit, "
     "standing order, bulk payment, cancellation, return, recall\n"
     "   - Map country adjectives to Temenos paths: 'Indian' → 'India', 'British' → 'United Kingdom'\n"
-    "3. DETECT the best mode for this query:\n"
+    "4. DETECT the best mode for this query:\n"
     "   - 'consultant': factual questions, explanations, how-does-X-work\n"
     "   - 'solution': requirement/need, 'we want to...', 'how to achieve...', design questions\n"
     "   - 'fitment': assess, evaluate, compare, fit, gap analysis, capability check\n"
     "   - 'testcase': test, QA, test cases, test scenarios, test steps, validate\n"
-    "4. GENERATE 2-3 focused search queries that will find the right documentation\n"
-    "5. ASSESS confidence (0-100) that the TPH documentation likely covers this topic\n\n"
+    "5. GENERATE 2-3 focused search queries for TPH CONCEPTS (not external system names)\n"
+    "6. ASSESS confidence (0-100)\n\n"
     "Respond with ONLY a JSON object (no markdown, no extra text):\n"
     "{\n"
-    '  "original": "user\'s original query",\n'
+    '  "original": "brief summary of user query",\n'
     '  "rewritten": "optimized TPH query",\n'
     '  "intent": "consultant|solution|fitment|testcase",\n'
-    '  "search_queries": ["query1", "query2", "query3"],\n'
+    '  "has_document": true/false,\n'
+    '  "search_queries": ["tph concept query1", "tph concept query2"],\n'
     '  "confidence": 85,\n'
-    '  "reasoning": "one sentence explaining the classification"\n'
+    '  "reasoning": "one sentence explanation"\n'
     "}\n\n"
-    "EXAMPLES:\n"
+    "EXAMPLES:\n\n"
+    '- User pastes Mobilepay integration BRD + asks for test cases\n'
+    '  → has_document: true\n'
+    '  → rewritten: "TPH payment initiation, fund transfer, API notification, '
+    'transaction reversal, timeout retry handling"\n'
+    '  → search_queries: ["payment initiation branch user fund transfer", '
+    '"API notification response handling TPH", "transaction reversal timeout retry"]\n'
+    '  → intent: "testcase", confidence: 90\n\n'
     '- "is it possible to capture collection requests cleared via domestic clearings DB"\n'
-    '  → rewritten: "Debit Collection (DB) application capturing collection requests for domestic clearings"\n'
+    '  → has_document: false\n'
+    '  → rewritten: "Debit Collection (DB) capturing collection requests for domestic clearings"\n'
     '  → intent: "consultant", confidence: 90\n\n'
-    '- "we need cross-border payments with SWIFT gpi tracking"\n'
-    '  → rewritten: "SWIFT gpi cross-border credit transfer with tracker in Payments Hub (PP)"\n'
-    '  → intent: "solution", confidence: 85\n\n'
-    '- "can TPH handle SEPA instant payments and direct debits?"\n'
-    '  → rewritten: "SEPA Instant Payment and SEPA Direct Debit support in TPH"\n'
-    '  → intent: "fitment", confidence: 90\n\n'
-    '- "create test cases for outward SWIFT payment"\n'
-    '  → rewritten: "Outward SWIFT credit transfer payment processing workflow and screens"\n'
-    '  → intent: "testcase", confidence: 85\n'
+    '- User pastes API spec + asks "how to implement this in TPH"\n'
+    '  → has_document: true\n'
+    '  → rewritten: "REST API integration with TPH payment processing"\n'
+    '  → search_queries: ["API integration TPH REST", "payment processing configuration", '
+    '"inward outward payment flow"]\n'
+    '  → intent: "solution", confidence: 85\n'
 )
 
 INTENT_TO_MODE = {
@@ -406,7 +423,7 @@ def stream_groq_response(client, system_prompt, context, question):
 def run_orchestrator(client, question):
     messages = [
         {"role": "system", "content": ORCHESTRATOR_PROMPT},
-        {"role": "user", "content": question},
+        {"role": "user", "content": question[:4000]},
     ]
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -422,21 +439,24 @@ def run_orchestrator(client, question):
             clean = clean.split("```")[1].replace("json", "").strip()
         result = json.loads(clean)
         return {
-            "original": result.get("original", question),
-            "rewritten": result.get("rewritten", question),
+            "original": result.get("original", question[:200]),
+            "rewritten": result.get("rewritten", question[:200]),
             "intent": result.get("intent", "consultant"),
-            "search_queries": result.get("search_queries", [question]),
+            "has_document": result.get("has_document", len(question) > 500),
+            "search_queries": result.get("search_queries", [question[:200]]),
             "confidence": result.get("confidence", 50),
             "reasoning": result.get("reasoning", ""),
         }
     except (json.JSONDecodeError, IndexError):
+        has_doc = len(question) > 500
         return {
-            "original": question,
-            "rewritten": question,
+            "original": question[:200],
+            "rewritten": question[:200],
             "intent": "consultant",
-            "search_queries": [question],
-            "confidence": 50,
-            "reasoning": "Could not parse orchestrator response, defaulting to consultant mode",
+            "has_document": has_doc,
+            "search_queries": [question[:200]],
+            "confidence": 85 if has_doc else 50,
+            "reasoning": "Could not parse orchestrator response",
         }
 
 
@@ -637,13 +657,16 @@ def main():
                 search_queries = orch["search_queries"]
                 reasoning = orch["reasoning"]
 
+                has_document = orch["has_document"]
+
                 if mode_override == "Auto-detect":
                     mode = INTENT_TO_MODE.get(detected_intent, "Payment Consultant")
                 else:
                     mode = mode_override
 
                 st.write(f"**Rewritten query:** {rewritten}")
-                st.write(f"**Mode:** {mode} | **Confidence:** {confidence}%")
+                doc_label = " | 📄 Document provided" if has_document else ""
+                st.write(f"**Mode:** {mode} | **Confidence:** {confidence}%{doc_label}")
                 if reasoning:
                     st.write(f"**Reasoning:** {reasoning}")
 
@@ -691,7 +714,7 @@ def main():
                         source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:8])
                     st.session_state.messages.append({"role": "assistant", "content": response + source_text})
             else:
-                # Use orchestrator's search queries for better retrieval
+                # Retrieve RAG context using orchestrator's search queries
                 all_contexts = []
                 all_sources = []
                 seen = set()
@@ -707,37 +730,52 @@ def main():
                             if src["url"] not in [s["url"] for s in all_sources]:
                                 all_sources.append(src)
 
-                if not all_contexts:
-                    st.markdown(NO_INFO_MSG)
-                    st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
-                    st.stop()
-
-                context = "\n\n---\n\n".join(all_contexts[:TOP_K])
+                rag_context = "\n\n---\n\n".join(all_contexts[:TOP_K]) if all_contexts else ""
                 sources = all_sources
 
-                with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
-                    is_relevant, reason = validate_context(client, context, rewritten)
-                    if is_relevant:
-                        status.update(label=f"✅ Validated: {reason}", state="complete")
+                if has_document:
+                    user_doc = question[:6000]
+                    if rag_context:
+                        context = (
+                            "=== USER PROVIDED DOCUMENT (PRIMARY CONTEXT) ===\n\n"
+                            f"{user_doc}\n\n"
+                            "=== TPH DOCUMENTATION (SUPPLEMENTARY REFERENCE) ===\n\n"
+                            f"{rag_context}"
+                        )
                     else:
-                        status.update(label=f"❌ Rejected: {reason}", state="error")
+                        context = (
+                            "=== USER PROVIDED DOCUMENT (PRIMARY CONTEXT) ===\n\n"
+                            f"{user_doc}\n\n"
+                            "=== TPH DOCUMENTATION ===\n\n"
+                            "No matching TPH documentation found in RAG. "
+                            "Use your TPH domain knowledge to analyze the document above."
+                        )
 
-                if not is_relevant:
-                    rejection_msg = (
-                        f"**No information available.**\n\n"
-                        f"🛡️ **Validator Agent:** {reason}\n\n"
-                        f"The retrieved documentation does not contain specific information "
-                        f"to answer your question. Try rephrasing with exact Temenos terminology."
-                    )
-                    st.markdown(rejection_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
-                else:
+                    doc_mode_prompt = MODE_PROMPTS[mode]
+                    if isinstance(doc_mode_prompt, str) and doc_mode_prompt != "SOLUTION_PROVIDER_MULTI_STEP":
+                        doc_mode_prompt = (
+                            "IMPORTANT: The user has provided a REQUIREMENT DOCUMENT as input. "
+                            "This document describes an integration or feature for an EXTERNAL system "
+                            "(e.g., Mobilepay, wallet, third-party API, etc.).\n\n"
+                            "Your task:\n"
+                            "1. Treat the user's document as PRIMARY CONTEXT — it defines what needs to be done\n"
+                            "2. Use the TPH documentation (if available) as SUPPLEMENTARY REFERENCE for how "
+                            "TPH handles similar patterns (payment initiation, fund transfer, API calls, etc.)\n"
+                            "3. Map the document's requirements to TPH concepts and workflows\n"
+                            "4. Generate your response based on the user's document, enriched with TPH knowledge\n"
+                            "5. Do NOT reject the query because the external system name isn't in TPH docs\n\n"
+                            + doc_mode_prompt
+                        )
+
+                    with st.status("📄 Document mode — using your document as primary context", expanded=False) as status:
+                        status.update(label="📄 Document mode — your document + TPH knowledge", state="complete")
+
                     response = st.write_stream(
-                        stream_groq_response(client, MODE_PROMPTS[mode], context, rewritten)
+                        stream_groq_response(client, doc_mode_prompt, context, rewritten)
                     )
                     if sources:
                         st.markdown("---")
-                        st.markdown("**📄 Sources:**")
+                        st.markdown("**📄 TPH Documentation Referenced:**")
                         for src in sources[:5]:
                             if src["url"]:
                                 st.markdown(f"- [{src['title']}]({src['url']}) ({src['score']:.0%})")
@@ -748,6 +786,49 @@ def main():
                     if sources:
                         source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:5])
                     st.session_state.messages.append({"role": "assistant", "content": response + source_text})
+
+                else:
+                    # Normal flow (no document) — validate then respond
+                    if not all_contexts:
+                        st.markdown(NO_INFO_MSG)
+                        st.session_state.messages.append({"role": "assistant", "content": NO_INFO_MSG})
+                        st.stop()
+
+                    context = rag_context
+
+                    with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
+                        is_relevant, reason = validate_context(client, context, rewritten)
+                        if is_relevant:
+                            status.update(label=f"✅ Validated: {reason}", state="complete")
+                        else:
+                            status.update(label=f"❌ Rejected: {reason}", state="error")
+
+                    if not is_relevant:
+                        rejection_msg = (
+                            f"**No information available.**\n\n"
+                            f"🛡️ **Validator Agent:** {reason}\n\n"
+                            f"The retrieved documentation does not contain specific information "
+                            f"to answer your question. Try rephrasing with exact Temenos terminology."
+                        )
+                        st.markdown(rejection_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
+                    else:
+                        response = st.write_stream(
+                            stream_groq_response(client, MODE_PROMPTS[mode], context, rewritten)
+                        )
+                        if sources:
+                            st.markdown("---")
+                            st.markdown("**📄 Sources:**")
+                            for src in sources[:5]:
+                                if src["url"]:
+                                    st.markdown(f"- [{src['title']}]({src['url']}) ({src['score']:.0%})")
+                                else:
+                                    st.markdown(f"- {src['title']} ({src['score']:.0%})")
+
+                        source_text = ""
+                        if sources:
+                            source_text = "\n\n---\n**Sources:** " + ", ".join(s["title"] for s in sources[:5])
+                        st.session_state.messages.append({"role": "assistant", "content": response + source_text})
 
 
 if __name__ == "__main__":
