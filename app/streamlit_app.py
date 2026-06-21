@@ -366,7 +366,7 @@ def validate_context(client, context, question):
         )},
     ]
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=messages,
         temperature=0.0,
         max_tokens=200,
@@ -391,7 +391,7 @@ def stream_groq_response(client, system_prompt, context, question):
         {"role": "user", "content": f"Documentation context:\n\n{context}\n\n---\nQuestion: {question}"},
     ]
     stream = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=messages,
         temperature=0.1,
         max_tokens=2048,
@@ -409,7 +409,7 @@ def run_orchestrator(client, question):
         {"role": "user", "content": question},
     ]
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=messages,
         temperature=0.0,
         max_tokens=500,
@@ -508,7 +508,7 @@ def solution_provider_flow(client, model, chunks, embeddings, search_texts, ques
         st.write("Breaking down your requirement into search queries...")
 
         discovery_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": SOLUTION_DISCOVERY_PROMPT},
                 {"role": "user", "content": f"Client requirement: {question}"},
