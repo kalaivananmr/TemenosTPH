@@ -360,38 +360,110 @@ def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K
     return "\n\n---\n\n".join(contexts), sources
 
 
-def get_groq_client():
-    from groq import Groq
-    api_key = os.environ.get("GROQ_API_KEY", "")
+def get_llm_client():
+    api_key = ""
+    provider = "gemini"
+
+    for key_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"]:
+        api_key = os.environ.get(key_name, "")
+        if not api_key:
+            try:
+                api_key = st.secrets[key_name]
+            except Exception:
+                pass
+        if api_key:
+            provider = "gemini"
+            break
+
     if not api_key:
-        try:
-            api_key = st.secrets["GROQ_API_KEY"]
-        except Exception:
-            api_key = ""
+        for key_name in ["GROQ_API_KEY"]:
+            api_key = os.environ.get(key_name, "")
+            if not api_key:
+                try:
+                    api_key = st.secrets[key_name]
+                except Exception:
+                    pass
+            if api_key:
+                provider = "groq"
+                break
+
     if not api_key:
-        st.error("GROQ_API_KEY not set. Add it in Streamlit Cloud: Settings > Secrets.")
+        st.error("No API key found. Add GEMINI_API_KEY (free, recommended) or GROQ_API_KEY in Settings > Secrets.")
         st.stop()
-    return Groq(api_key=api_key)
+
+    return api_key, provider
 
 
-def validate_context(client, context, question):
-    messages = [
-        {"role": "system", "content": VALIDATOR_PROMPT},
-        {"role": "user", "content": (
-            f"User question: {question}\n\n"
-            f"Retrieved documentation context:\n{context[:3000]}"
-        )},
-    ]
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=messages,
-        temperature=0.0,
-        max_tokens=200,
+def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=False):
+    if provider == "gemini":
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            "gemini-2.0-flash",
+            system_instruction=system_prompt,
+        )
+        if stream:
+            response = model.generate_content(
+                user_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                ),
+                stream=True,
+            )
+            for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+        else:
+            response = model.generate_content(
+                user_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            yield response.text
+    else:
+        from groq import Groq
+        client = Groq(api_key=api_key)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if stream:
+            resp = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in resp:
+                text = chunk.choices[0].delta.content
+                if text:
+                    yield text
+        else:
+            resp = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            yield resp.choices[0].message.content
+
+
+def call_llm_once(api_key, provider, system_prompt, user_prompt, temperature=0.0, max_tokens=500):
+    return "".join(call_llm(api_key, provider, system_prompt, user_prompt, temperature, max_tokens, stream=False))
+
+
+def validate_context(api_key, provider, context, question):
+    result_text = call_llm_once(
+        api_key, provider, VALIDATOR_PROMPT,
+        f"User question: {question}\n\nRetrieved documentation context:\n{context[:3000]}",
     )
-    result_text = response.choices[0].message.content.strip()
 
     try:
-        clean = result_text
+        clean = result_text.strip()
         if "```" in clean:
             clean = clean.split("```")[1].replace("json", "").strip()
         result = json.loads(clean)
@@ -402,36 +474,15 @@ def validate_context(client, context, question):
         return False, result_text
 
 
-def stream_groq_response(client, system_prompt, context, question):
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Documentation context:\n\n{context}\n\n---\nQuestion: {question}"},
-    ]
-    stream = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=messages,
-        temperature=0.1,
-        max_tokens=2048,
-        stream=True,
-    )
-    for chunk in stream:
-        text = chunk.choices[0].delta.content
-        if text:
-            yield text
+def stream_response(api_key, provider, system_prompt, context, question):
+    user_prompt = f"Documentation context:\n\n{context}\n\n---\nQuestion: {question}"
+    yield from call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=True)
 
 
-def run_orchestrator(client, question):
-    messages = [
-        {"role": "system", "content": ORCHESTRATOR_PROMPT},
-        {"role": "user", "content": question[:4000]},
-    ]
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=messages,
-        temperature=0.0,
-        max_tokens=500,
+def run_orchestrator(api_key, provider, question):
+    result_text = call_llm_once(
+        api_key, provider, ORCHESTRATOR_PROMPT, question[:4000],
     )
-    result_text = response.choices[0].message.content.strip()
 
     try:
         clean = result_text
@@ -523,21 +574,15 @@ SOLUTION_ARCHITECT_PROMPT = (
 )
 
 
-def solution_provider_flow(client, model, chunks, embeddings, search_texts, question):
+def solution_provider_flow(api_key, provider, model, chunks, embeddings, search_texts, question):
     with st.status("🔍 Discovery Agent — analyzing requirement...", expanded=True) as status:
         st.write("Breaking down your requirement into search queries...")
 
-        discovery_response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": SOLUTION_DISCOVERY_PROMPT},
-                {"role": "user", "content": f"Client requirement: {question}"},
-            ],
+        search_queries_text = call_llm_once(
+            api_key, provider, SOLUTION_DISCOVERY_PROMPT,
+            f"Client requirement: {question}",
             temperature=0.1,
-            max_tokens=500,
         )
-
-        search_queries_text = discovery_response.choices[0].message.content.strip()
         try:
             if "```" in search_queries_text:
                 search_queries_text = search_queries_text.split("```")[1].replace("json", "").strip()
@@ -579,7 +624,7 @@ def solution_provider_flow(client, model, chunks, embeddings, search_texts, ques
         )
 
     with st.status("🛡️ Validator Agent — verifying relevance...", expanded=False) as status:
-        is_relevant, reason = validate_context(client, combined_context, question)
+        is_relevant, reason = validate_context(api_key, provider, combined_context, question)
         if is_relevant:
             status.update(label=f"✅ Validated: {reason}", state="complete")
         else:
@@ -589,7 +634,7 @@ def solution_provider_flow(client, model, chunks, embeddings, search_texts, ques
     st.write("🏗️ **Solution Architect Agent** — designing solution...")
 
     response = st.write_stream(
-        stream_groq_response(client, SOLUTION_ARCHITECT_PROMPT, combined_context, question)
+        stream_response(api_key, provider, SOLUTION_ARCHITECT_PROMPT, combined_context, question)
     )
 
     return response, all_sources
@@ -631,6 +676,9 @@ def main():
 
     with st.sidebar:
         st.markdown(f"📚 **{len(chunks):,}** document chunks loaded")
+        api_key_check, provider_check = get_llm_client()
+        provider_label = "Google Gemini 2.0 Flash" if provider_check == "gemini" else "Groq LLaMA 3.1"
+        st.markdown(f"🤖 **LLM:** {provider_label}")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -644,13 +692,13 @@ def main():
         with st.chat_message("user"):
             st.markdown(question)
 
-        client = get_groq_client()
+        api_key, provider = get_llm_client()
 
         with st.chat_message("assistant"):
 
             # === ORCHESTRATOR AGENT (always runs first) ===
             with st.status("🧠 Orchestrator Agent — analyzing query...", expanded=True) as orch_status:
-                orch = run_orchestrator(client, question)
+                orch = run_orchestrator(api_key, provider, question)
                 rewritten = orch["rewritten"]
                 confidence = orch["confidence"]
                 detected_intent = orch["intent"]
@@ -695,7 +743,7 @@ def main():
             # === ROUTE TO MODE ===
             if mode == "Solution Provider":
                 response, sources = solution_provider_flow(
-                    client, model, chunks, embeddings, search_texts, rewritten
+                    api_key, provider, model, chunks, embeddings, search_texts, rewritten
                 )
                 if response is None:
                     st.markdown(NO_INFO_MSG)
@@ -771,7 +819,7 @@ def main():
                         status.update(label="📄 Document mode — your document + TPH knowledge", state="complete")
 
                     response = st.write_stream(
-                        stream_groq_response(client, doc_mode_prompt, context, rewritten)
+                        stream_response(api_key, provider, doc_mode_prompt, context, rewritten)
                     )
                     if sources:
                         st.markdown("---")
@@ -797,7 +845,7 @@ def main():
                     context = rag_context
 
                     with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
-                        is_relevant, reason = validate_context(client, context, rewritten)
+                        is_relevant, reason = validate_context(api_key, provider, context, rewritten)
                         if is_relevant:
                             status.update(label=f"✅ Validated: {reason}", state="complete")
                         else:
@@ -814,7 +862,7 @@ def main():
                         st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
                     else:
                         response = st.write_stream(
-                            stream_groq_response(client, MODE_PROMPTS[mode], context, rewritten)
+                            stream_response(api_key, provider, MODE_PROMPTS[mode], context, rewritten)
                         )
                         if sources:
                             st.markdown("---")
