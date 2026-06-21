@@ -59,8 +59,8 @@ VISITED_LOG    = Path("temenos_visited.txt")
 NAV_LOG        = Path("temenos_nav.json")
 DELAY_SECONDS  = 1.5
 MAX_RETRIES    = 3
-CHUNK_SIZE     = 1500
-CHUNK_OVERLAP  = 200
+CHUNK_SIZE     = 3000
+CHUNK_OVERLAP  = 500
 MAX_PAGES      = 5000
 LOGIN_FAIL_LIMIT = 10
 IGNORED_FRAGMENTS = {
@@ -657,11 +657,36 @@ async def do_crawl():
 
 
 # ═══════════════════════════════════════════════════════════════
-#  TEXT CHUNKING FOR RAG
+#  TEXT CHUNKING FOR RAG — Heading-based with fallback
 # ═══════════════════════════════════════════════════════════════
-def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    """Split text into overlapping chunks, preferring to break at paragraph
-    or sentence boundaries."""
+def split_by_headings(text):
+    """Split markdown text into sections based on headings (##, ###, ####).
+    Each section includes its heading and all content until the next heading."""
+    heading_pattern = re.compile(r'^(#{2,4})\s+(.+)$', re.MULTILINE)
+    matches = list(heading_pattern.finditer(text))
+
+    if not matches:
+        return [("", text)]
+
+    sections = []
+    if matches[0].start() > 0:
+        preamble = text[:matches[0].start()].strip()
+        if preamble:
+            sections.append(("", preamble))
+
+    for i, match in enumerate(matches):
+        heading = match.group(2).strip()
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        content = text[start:end].strip()
+        if content:
+            sections.append((heading, content))
+
+    return sections
+
+
+def chunk_by_size(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    """Fallback: split large text by size at paragraph/sentence boundaries."""
     if len(text) <= chunk_size:
         return [text]
 
@@ -671,13 +696,10 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         end = start + chunk_size
 
         if end < len(text):
-            # Try to break at paragraph boundary
             para_break = text.rfind("\n\n", start + chunk_size // 2, end)
             if para_break > start:
                 end = para_break
-
             else:
-                # Try sentence boundary
                 for sep in [". ", ".\n", "? ", "!\n"]:
                     sent_break = text.rfind(sep, start + chunk_size // 2, end)
                     if sent_break > start:
@@ -695,6 +717,31 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     return chunks
 
 
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    """Smart chunking: split by headings first, then by size if sections are too large.
+    Returns list of (section_heading, chunk_text) tuples."""
+    if len(text) <= chunk_size:
+        heading = ""
+        headings = re.findall(r'^(#{1,4})\s+(.+)$', text, re.MULTILINE)
+        if headings:
+            heading = headings[0][1].strip()
+        return [(heading, text)]
+
+    sections = split_by_headings(text)
+    result = []
+
+    for heading, section_text in sections:
+        if len(section_text) <= chunk_size:
+            result.append((heading, section_text))
+        else:
+            sub_chunks = chunk_by_size(section_text, chunk_size, overlap)
+            for j, sub in enumerate(sub_chunks):
+                label = f"{heading} (part {j+1})" if heading else ""
+                result.append((label, sub))
+
+    return result
+
+
 def extract_heading_context(text, position):
     """Find the most recent heading before a given position in the text."""
     before = text[:position]
@@ -703,6 +750,30 @@ def extract_heading_context(text, position):
         last = headings[-1]
         return last.group(2).strip()
     return ""
+
+
+def detect_topic_tag(slug, heading, content):
+    """Tag a chunk with a topic category based on its content and path."""
+    slug_lower = slug.lower()
+    heading_lower = heading.lower()
+    combined = f"{slug_lower} {heading_lower} {content[:200].lower()}"
+
+    topic_patterns = [
+        ("configuration", ["configuration", "configuring", "config", "setup", "parameter"]),
+        ("introduction", ["introduction", "overview", "about"]),
+        ("workflow", ["task", "working with", "workflow", "activity", "process", "step"]),
+        ("output", ["output", "report", "message", "notification"]),
+        ("clearing", ["clearing", "settlement", "rtgs", "swift", "sepa", "neft", "bacs"]),
+        ("payment_initiation", ["payment initiation", " pi ", "credit transfer"]),
+        ("debit_collection", ["debit collection", " db ", "direct debit"]),
+        ("payments_hub", ["payments hub", " pp ", "processing"]),
+        ("integration", ["integration", "interface", "api", "message exchange"]),
+        ("screen_navigation", ["screen", "menu", "field", "button", "navigate"]),
+    ]
+    for tag, keywords in topic_patterns:
+        if any(kw in combined for kw in keywords):
+            return tag
+    return "general"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -776,9 +847,11 @@ def do_rag():
             chunks = chunk_text(body)
             page_chunk_ids = []
 
-            for i, chunk in enumerate(chunks):
-                section_heading = extract_heading_context(body, body.find(chunk[:50]))
-                chunk_id = hashlib.sha256(f"{slug}:{i}".encode()).hexdigest()[:16]
+            for i, (section_heading, chunk_content) in enumerate(chunks):
+                if not section_heading:
+                    section_heading = extract_heading_context(body, body.find(chunk_content[:50]))
+                topic_tag = detect_topic_tag(slug, section_heading, chunk_content)
+                chunk_id = hashlib.sha256(f"{slug}:{i}:{section_heading}".encode()).hexdigest()[:16]
 
                 doc = {
                     "id": chunk_id,
@@ -787,12 +860,14 @@ def do_rag():
                     "total_chunks": len(chunks),
                     "title": title,
                     "section": section_heading,
+                    "topic": topic_tag,
                     "breadcrumbs": breadcrumb_str,
                     "source_url": source_url,
-                    "content": chunk,
+                    "content": chunk_content,
                     "metadata": {
                         "domain": "temenos_payments",
                         "doc_type": "product_documentation",
+                        "topic": topic_tag,
                         "sections": sections[:10],
                     }
                 }

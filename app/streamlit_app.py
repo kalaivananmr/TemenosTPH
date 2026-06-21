@@ -12,7 +12,7 @@ import streamlit as st
 from pathlib import Path
 
 CHUNKS_FILE = Path(__file__).parent.parent / "rag" / "chunks.jsonl"
-TOP_K = 8
+TOP_K = 12
 MIN_KEYWORD_MATCH = 0.7
 
 STOP_WORDS = {
@@ -50,8 +50,26 @@ SYNONYMS = {
     "fps": "faster payments", "ips": "instant payments",
 }
 
+SYNTHESIS_INSTRUCTION = (
+    "CONTEXT SYNTHESIS RULES (apply before answering):\n"
+    "The retrieved RAG context may arrive as multiple fragmented chunks "
+    "belonging to the same document or topic.\n"
+    "Before answering:\n"
+    "1. MERGE chunks that belong to the same requirement, topic, or workflow "
+    "into one coherent context. Use the [title] and [section] headers to identify related chunks.\n"
+    "2. RESOLVE ordering using logical workflow sequence (e.g., Configuration → Processing → Output), "
+    "not the order chunks appear.\n"
+    "3. If chunks overlap or repeat, use the most complete and specific version.\n"
+    "4. If chunks contradict, prioritize the chunk with higher match % or more specific section heading.\n"
+    "5. Answer using the merged context as a SINGLE coherent source — do NOT answer chunk-by-chunk "
+    "or list each chunk separately.\n"
+    "6. When referencing screens, navigation, or steps, reconstruct the full workflow path "
+    "from the merged context.\n\n"
+)
+
 MODE_PROMPTS = {
     "Payment Consultant": (
+        SYNTHESIS_INSTRUCTION +
         "You are a Senior Temenos Payments & Banking Consultant with deep domain expertise.\n\n"
         "TASK: Search the provided RAG documentation context and answer the user's query "
         "professionally, accurately, and using proper banking and Temenos domain terminology "
@@ -66,6 +84,7 @@ MODE_PROMPTS = {
     ),
     "Solution Provider": "SOLUTION_PROVIDER_MULTI_STEP",
     "Core Fitment Assessor": (
+        SYNTHESIS_INSTRUCTION +
         "You are a Banking Fitment Analyst specializing in Temenos Payments Hub (TPH).\n\n"
         "TASK: For each requirement provided by the user, search the RAG documentation context "
         "and assess the fitment percentage based strictly on documented TPH capabilities.\n\n"
@@ -86,6 +105,7 @@ MODE_PROMPTS = {
         "- After the table, provide an overall fitment summary with total weighted %."
     ),
     "Test Case Generator": (
+        SYNTHESIS_INSTRUCTION +
         "You are a QA Engineer specializing in Temenos Payments Hub (TPH) testing.\n\n"
         "TASK: From the RAG documentation context, extract the navigation paths, "
         "workflow steps, screens, and field-level details relevant to the user's requirement. "
@@ -199,6 +219,7 @@ def load_knowledge_base():
             c.get("title", ""),
             c.get("section", ""),
             c.get("breadcrumbs", ""),
+            c.get("topic", ""),
             c.get("doc_id", "").replace("__", " ").replace("_", " "),
             c.get("source_url", "").replace("/", " ").replace("_", " "),
         ]).lower()
@@ -346,6 +367,7 @@ SOLUTION_DISCOVERY_PROMPT = (
 )
 
 SOLUTION_ARCHITECT_PROMPT = (
+    SYNTHESIS_INSTRUCTION +
     "You are a Senior TPH Solution Architect with deep expertise in Temenos Payments Hub "
     "and banking payment systems.\n\n"
     "You have been given a client requirement AND relevant TPH documentation gathered "
