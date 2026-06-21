@@ -503,6 +503,45 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
         except Exception as e:
             errors.append(f"Groq: {e}")
 
+    hf_key = ""
+    for key_name in ["HF_API_KEY", "HUGGINGFACE_API_KEY", "HF_TOKEN"]:
+        hf_key = os.environ.get(key_name, "")
+        if not hf_key:
+            try:
+                hf_key = st.secrets[key_name]
+            except Exception:
+                pass
+        if hf_key:
+            break
+
+    if hf_key:
+        try:
+            from huggingface_hub import InferenceClient
+            hf_client = InferenceClient(api_key=hf_key)
+            combined_prompt = f"System: {system_prompt}\n\nUser: {user_prompt[:3000]}"
+            if stream:
+                resp = hf_client.text_generation(
+                    combined_prompt,
+                    model="mistralai/Mistral-7B-Instruct-v0.3",
+                    max_new_tokens=max_tokens,
+                    temperature=max(temperature, 0.01),
+                    stream=True,
+                )
+                for token in resp:
+                    yield token
+                return
+            else:
+                resp = hf_client.text_generation(
+                    combined_prompt,
+                    model="mistralai/Mistral-7B-Instruct-v0.3",
+                    max_new_tokens=max_tokens,
+                    temperature=max(temperature, 0.01),
+                )
+                yield resp
+                return
+        except Exception as e:
+            errors.append(f"HuggingFace: {e}")
+
     error_detail = " | ".join(errors) if errors else "No API keys configured"
     yield f"**All LLM providers exhausted.** Wait a few minutes and retry.\n\nDetails: {error_detail}"
 
