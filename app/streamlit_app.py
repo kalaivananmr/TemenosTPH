@@ -784,7 +784,54 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
             groq_key = k
             break
 
+    openai_key = ""
+    for key_name in ["OPENAI_API_KEY"]:
+        k = os.environ.get(key_name, "")
+        if not k:
+            try:
+                k = st.secrets[key_name]
+            except Exception:
+                pass
+        if k:
+            openai_key = k
+            break
+
     errors = []
+
+    if openai_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            if stream:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
+                yield "*[Model: openai/gpt-4o-mini]*\n\n"
+                for chunk in resp:
+                    text = chunk.choices[0].delta.content
+                    if text:
+                        yield text
+                return
+            else:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                yield "*[Model: openai/gpt-4o-mini]*\n\n"
+                yield resp.choices[0].message.content
+                return
+        except Exception as e:
+            errors.append(f"OpenAI: {e}")
 
     if gemini_key:
         try:
