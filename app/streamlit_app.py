@@ -725,23 +725,39 @@ def _try_gemini(api_key, system_prompt, user_prompt, temperature, max_tokens, st
     raise last_error
 
 
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
+
+
 def _try_groq(api_key, system_prompt, user_prompt, temperature, max_tokens, stream):
     from groq import Groq
     client = Groq(api_key=api_key)
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": system_prompt[:1500]},
         {"role": "user", "content": user_prompt[:3500]},
     ]
-    if stream:
-        return client.chat.completions.create(
-            model="llama-3.1-8b-instant", messages=messages,
-            temperature=temperature, max_tokens=max_tokens, stream=True,
-        )
-    else:
-        return client.chat.completions.create(
-            model="llama-3.1-8b-instant", messages=messages,
-            temperature=temperature, max_tokens=max_tokens,
-        )
+    last_error = None
+    for model_name in GROQ_MODELS:
+        try:
+            if stream:
+                return client.chat.completions.create(
+                    model=model_name, messages=messages,
+                    temperature=temperature, max_tokens=max_tokens, stream=True,
+                ), model_name
+            else:
+                return client.chat.completions.create(
+                    model=model_name, messages=messages,
+                    temperature=temperature, max_tokens=max_tokens,
+                ), model_name
+        except Exception as e:
+            last_error = e
+            if "429" in str(e) or "rate" in str(e).lower() or "quota" in str(e).lower():
+                continue
+            else:
+                raise
+    raise last_error
 
 
 def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=False):
@@ -790,16 +806,16 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
     if groq_key:
         try:
             if stream:
-                resp = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, True)
-                yield "*[Model: groq/llama-3.1-8b]*\n\n"
+                resp, groq_model = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, True)
+                yield f"*[Model: groq/{groq_model}]*\n\n"
                 for chunk in resp:
                     text = chunk.choices[0].delta.content
                     if text:
                         yield text
                 return
             else:
-                resp = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, False)
-                yield "*[Model: groq/llama-3.1-8b]*\n\n"
+                resp, groq_model = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, False)
+                yield f"*[Model: groq/{groq_model}]*\n\n"
                 yield resp.choices[0].message.content
                 return
         except Exception as e:
