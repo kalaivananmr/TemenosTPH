@@ -868,10 +868,18 @@ def validate_context(api_key, provider, context, question):
 
 def stream_response(api_key, provider, system_prompt, context, question):
     user_prompt = (
-        f"Documentation context:\n\n{context}\n\n---\n"
-        f"IMPORTANT: Answer ONLY the following question. Do NOT create a different question. "
-        f"Do NOT write 'User Query:' in your response. Do NOT mention topics the user did not ask about.\n\n"
-        f"Question: {question}"
+        f"DOCUMENTATION CONTEXT:\n\n{context[:4000]}\n\n"
+        f"{'=' * 40}\n"
+        f"USER QUESTION: {question}\n"
+        f"{'=' * 40}\n\n"
+        f"INSTRUCTIONS:\n"
+        f"1. Read the documentation context above.\n"
+        f"2. Answer the USER QUESTION directly using information from the context.\n"
+        f"3. Start your answer immediately — do NOT say 'please provide your question' "
+        f"or ask for clarification.\n"
+        f"4. Do NOT create a different question. Do NOT write 'User Query:' in your response.\n"
+        f"5. If the question asks to 'list' or 'what types', respond with bullet points.\n\n"
+        f"YOUR ANSWER:\n"
     )
     yield from call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=True)
 
