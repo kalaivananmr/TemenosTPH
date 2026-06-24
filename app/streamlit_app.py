@@ -866,22 +866,25 @@ def validate_context(api_key, provider, context, question):
         return False, result_text
 
 
+SIMPLE_SYSTEM_PROMPT = (
+    "You are a Temenos Payments Hub expert. "
+    "Answer questions using ONLY the documentation provided. "
+    "Be concise. Use bullet points for lists. "
+    "Cite the source document name. "
+    "Never say 'please provide your question'. "
+    "Never ask for clarification. "
+    "Start answering immediately."
+)
+
+
 def stream_response(api_key, provider, system_prompt, context, question):
+    short_prompt = SIMPLE_SYSTEM_PROMPT + "\n\n" + system_prompt[-500:] if len(system_prompt) > 800 else system_prompt
     user_prompt = (
-        f"DOCUMENTATION CONTEXT:\n\n{context[:4000]}\n\n"
-        f"{'=' * 40}\n"
-        f"USER QUESTION: {question}\n"
-        f"{'=' * 40}\n\n"
-        f"INSTRUCTIONS:\n"
-        f"1. Read the documentation context above.\n"
-        f"2. Answer the USER QUESTION directly using information from the context.\n"
-        f"3. Start your answer immediately — do NOT say 'please provide your question' "
-        f"or ask for clarification.\n"
-        f"4. Do NOT create a different question. Do NOT write 'User Query:' in your response.\n"
-        f"5. If the question asks to 'list' or 'what types', respond with bullet points.\n\n"
-        f"YOUR ANSWER:\n"
+        f"Documentation:\n{context[:3500]}\n\n"
+        f"Question: {question}\n\n"
+        f"Answer:"
     )
-    yield from call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=True)
+    yield from call_llm(api_key, provider, short_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=True)
 
 
 def _detect_intent_from_text(question):
