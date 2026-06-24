@@ -114,13 +114,21 @@ MODE_PROMPTS = {
         "TASK: Search the provided RAG documentation context and answer the user's query "
         "professionally, accurately, and using proper banking and Temenos domain terminology "
         "(PI, PP, DB, POR, ISO 20022, pacs, pain, camt, etc.).\n\n"
+        "RESPONSE STYLE:\n"
+        "- If user asks 'what is/are', 'list', 'which', 'does X support' → give a CONCISE "
+        "direct answer with bullet points. No requirement analysis or solution design format.\n"
+        "- If user asks 'how does X work' → give a step-by-step explanation.\n"
+        "- If user asks 'explain' → give a clear description with examples.\n"
+        "- NEVER use 'Requirement Analysis', 'Proposed Solution', 'End-to-End Flow', "
+        "'Technical Feasibility', 'Gaps & Risks', or 'Clarifying Questions' format "
+        "unless the user explicitly asks for a solution.\n\n"
         "RULES:\n"
         "- Stay grounded in the RAG context ONLY. Do NOT use outside knowledge.\n"
         "- Cite the source document/section for every claim.\n"
         "- If the RAG context does not contain the answer, say: "
         "'This information is not available in the current documentation.'\n"
         "- Do NOT guess, infer, or fabricate information.\n"
-        "- Structure your response clearly with headings where appropriate."
+        "- Keep answers focused and concise — match the question's scope."
     ),
     "Solution Provider": "SOLUTION_PROVIDER_MULTI_STEP",
     "Core Fitment Assessor": (
@@ -870,9 +878,15 @@ def stream_response(api_key, provider, system_prompt, context, question):
 
 def _detect_intent_from_text(question):
     q = question.lower()
+    if any(w in q for w in ["what is", "what are", "what does", "list ", "which ",
+                             "how does", "explain", "describe", "define",
+                             "does it support", "does pi support", "does pp support",
+                             "does tph support", "tell me about", "overview of"]):
+        return "consultant"
     if any(w in q for w in ["test case", "test scenario", "qa", "validate", "testing"]):
         return "testcase"
-    if any(w in q for w in ["solution", "how to achieve", "implement", "design", "workflow", "we need", "we want"]):
+    if any(w in q for w in ["solution", "how to achieve", "implement", "design",
+                             "we need", "we want", "configure", "set up", "build"]):
         return "solution"
     if any(w in q for w in ["fitment", "assess", "evaluate", "gap", "fit", "capability"]):
         return "fitment"
@@ -1064,7 +1078,7 @@ SOLUTION_ARCHITECT_PROMPT = (
 )
 
 
-def solution_provider_flow(api_key, provider, model, chunks, embeddings, search_texts, question):
+def solution_provider_flow(api_key, provider, model, chunks, embeddings, search_texts, question, filter_country=False):
     with st.status("🔍 Discovery Agent — analyzing requirement...", expanded=True) as status:
         st.write("Breaking down your requirement into search queries...")
 
@@ -1091,7 +1105,7 @@ def solution_provider_flow(api_key, provider, model, chunks, embeddings, search_
         seen_chunks = set()
 
         for sq in search_queries:
-            ctx, srcs = retrieve_context(model, chunks, embeddings, search_texts, sq, top_k=5)
+            ctx, srcs = retrieve_context(model, chunks, embeddings, search_texts, sq, top_k=5, filter_country=filter_country)
             if ctx:
                 for chunk_text in ctx.split("\n\n---\n\n"):
                     chunk_hash = hash(chunk_text[:100])
@@ -1196,7 +1210,18 @@ def main():
                 has_document = orch["has_document"]
                 has_country = orch.get("has_country", False)
 
-                if mode_override == "Auto-detect":
+                q_check = question.lower()
+                is_factual = any(w in q_check for w in [
+                    "what is", "what are", "what does", "list ", "which ",
+                    "how does", "explain ", "describe ", "define ",
+                    "does it support", "does pi support", "does pp support",
+                    "does tph support", "tell me about", "overview",
+                    "what payment", "what types", "what status",
+                ])
+
+                if is_factual:
+                    mode = "Payment Consultant"
+                elif mode_override == "Auto-detect":
                     mode = INTENT_TO_MODE.get(detected_intent, "Payment Consultant")
                 else:
                     mode = mode_override
@@ -1235,7 +1260,8 @@ def main():
             # === ROUTE TO MODE ===
             if mode == "Solution Provider":
                 response, sources = solution_provider_flow(
-                    api_key, provider, model, chunks, embeddings, search_texts, question
+                    api_key, provider, model, chunks, embeddings, search_texts, question,
+                    filter_country=not has_country,
                 )
                 if response is None:
                     st.markdown(NO_INFO_MSG)
