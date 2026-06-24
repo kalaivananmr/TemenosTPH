@@ -774,12 +774,14 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
         try:
             if stream:
                 response, used_model = _try_gemini(gemini_key, system_prompt, user_prompt, temperature, max_tokens, True)
+                yield f"*[Model: {used_model}]*\n\n"
                 for chunk in response:
                     if chunk.text:
                         yield chunk.text
                 return
             else:
                 response, used_model = _try_gemini(gemini_key, system_prompt, user_prompt, temperature, max_tokens, False)
+                yield f"*[Model: {used_model}]*\n\n"
                 yield response.text
                 return
         except Exception as e:
@@ -789,6 +791,7 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
         try:
             if stream:
                 resp = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, True)
+                yield "*[Model: groq/llama-3.1-8b]*\n\n"
                 for chunk in resp:
                     text = chunk.choices[0].delta.content
                     if text:
@@ -796,6 +799,7 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
                 return
             else:
                 resp = _try_groq(groq_key, system_prompt, user_prompt, temperature, max_tokens, False)
+                yield "*[Model: groq/llama-3.1-8b]*\n\n"
                 yield resp.choices[0].message.content
                 return
         except Exception as e:
@@ -816,26 +820,33 @@ def call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max
         try:
             from huggingface_hub import InferenceClient
             hf_client = InferenceClient(api_key=hf_key)
-            combined_prompt = f"System: {system_prompt}\n\nUser: {user_prompt[:3000]}"
+            messages = [
+                {"role": "system", "content": system_prompt[:800]},
+                {"role": "user", "content": user_prompt[:3000]},
+            ]
             if stream:
-                resp = hf_client.text_generation(
-                    combined_prompt,
-                    model="mistralai/Mistral-7B-Instruct-v0.3",
-                    max_new_tokens=max_tokens,
+                resp = hf_client.chat.completions.create(
+                    model="meta-llama/Llama-3.1-8B-Instruct",
+                    messages=messages,
+                    max_tokens=max_tokens,
                     temperature=max(temperature, 0.01),
                     stream=True,
                 )
-                for token in resp:
-                    yield token
+                yield "*[Model: hf/llama-3.1-8b]*\n\n"
+                for chunk in resp:
+                    text = chunk.choices[0].delta.content
+                    if text:
+                        yield text
                 return
             else:
-                resp = hf_client.text_generation(
-                    combined_prompt,
-                    model="mistralai/Mistral-7B-Instruct-v0.3",
-                    max_new_tokens=max_tokens,
+                resp = hf_client.chat.completions.create(
+                    model="meta-llama/Llama-3.1-8B-Instruct",
+                    messages=messages,
+                    max_tokens=max_tokens,
                     temperature=max(temperature, 0.01),
                 )
-                yield resp
+                yield "*[Model: hf/llama-3.1-8b]*\n\n"
+                yield resp.choices[0].message.content
                 return
         except Exception as e:
             errors.append(f"HuggingFace: {e}")
