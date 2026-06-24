@@ -572,14 +572,9 @@ def load_knowledge_base():
     return model, chunks, embeddings, search_texts
 
 
-COUNTRY_DOC_PATTERNS = [
-    "clearing_rtgs__africa", "clearing_rtgs__argentina", "clearing_rtgs__australia",
-    "clearing_rtgs__brazil", "clearing_rtgs__canada", "clearing_rtgs__europe",
-    "clearing_rtgs__hong", "clearing_rtgs__india", "clearing_rtgs__israel",
-    "clearing_rtgs__lebanon", "clearing_rtgs__saudi", "clearing_rtgs__sri",
-    "clearing_rtgs__united", "clearing_rtgs__nordic",
-    "request_to_pay__eba", "request_to_pay__rtp_uk", "request_to_pay__saips",
-    "request_to_pay__united",
+COUNTRY_SPECIFIC_PREFIXES = [
+    "clearing_rtgs__",
+    "request_to_pay__",
 ]
 
 
@@ -627,8 +622,8 @@ def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K
         generic_results = []
         for r in results:
             doc_id = chunks[r[0]].get("doc_id", "").lower()
-            is_country_doc = any(pat in doc_id for pat in COUNTRY_DOC_PATTERNS)
-            if not is_country_doc:
+            is_country = any(doc_id.startswith(pat) for pat in COUNTRY_SPECIFIC_PREFIXES)
+            if not is_country:
                 generic_results.append(r)
         if generic_results:
             results = generic_results
