@@ -1178,7 +1178,7 @@ def main():
             # === ROUTE TO MODE ===
             if mode == "Solution Provider":
                 response, sources = solution_provider_flow(
-                    api_key, provider, model, chunks, embeddings, search_texts, rewritten
+                    api_key, provider, model, chunks, embeddings, search_texts, question
                 )
                 if response is None:
                     st.markdown(NO_INFO_MSG)
@@ -1254,7 +1254,7 @@ def main():
                         status.update(label="📄 Document mode — your document + TPH knowledge", state="complete")
 
                     response = st.write_stream(
-                        stream_response(api_key, provider, doc_mode_prompt, context, rewritten)
+                        stream_response(api_key, provider, doc_mode_prompt, context, question)
                     )
                     if sources:
                         st.markdown("---")
@@ -1280,7 +1280,7 @@ def main():
                     context = rag_context
 
                     with st.status("🛡️ Validator Agent checking relevance...", expanded=False) as status:
-                        is_relevant, reason = validate_context(api_key, provider, context, rewritten)
+                        is_relevant, reason = validate_context(api_key, provider, context, question)
                         if is_relevant:
                             status.update(label=f"✅ Validated: {reason}", state="complete")
                         else:
@@ -1297,7 +1297,7 @@ def main():
                         st.session_state.messages.append({"role": "assistant", "content": rejection_msg})
                     else:
                         response = st.write_stream(
-                            stream_response(api_key, provider, MODE_PROMPTS[mode], context, rewritten)
+                            stream_response(api_key, provider, MODE_PROMPTS[mode], context, question)
                         )
                         if sources:
                             st.markdown("---")
