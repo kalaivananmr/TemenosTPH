@@ -181,7 +181,11 @@ VALIDATOR_PROMPT = (
     "3. If user provides a requirement document about an external system (Mobilepay, "
     "UPI, wallet, fintech) that involves fund movement → relevant: true "
     "(TPH handles all payment types — the patterns are transferable)\n"
-    "4. If context has NO connection to payments or fund movement at all → relevant: false\n\n"
+    "4. If user asks about SWIFT field codes (71G, 71F, 32A, 50K, 59, MT103, MT202, "
+    "pacs.008, pain.001, camt.053) or charge types (OUR, BEN, SHA) or "
+    "any banking/payment terminology → relevant: true if context mentions "
+    "any of these codes, charge types, or related payment processing\n"
+    "5. If context has NO connection to payments or fund movement at all → relevant: false\n\n"
     "THINK LIKE A HUMAN: A payment consultant would NEVER reject a question about "
     "'loading a wallet' just because 'wallet' isn't in TPH docs. They'd recognize it as "
     "a credit transfer/fund transfer and use TPH's payment initiation patterns.\n\n"
@@ -215,7 +219,13 @@ ORCHESTRATOR_PROMPT = (
     "- Settlement → Clearing and settlement processing\n"
     "- QR payment / scan-and-pay → Payment Initiation with merchant reference\n"
     "- Bulk upload → Bulk payment processing\n"
-    "- Standing instruction → Standing Order\n\n"
+    "- Standing instruction → Standing Order\n"
+    "- SWIFT fields (71G, 71F, 32A, 50K, 59, etc.) → SWIFT message payment processing\n"
+    "- Charge types (OUR, BEN, SHA) → Payment charges and fees processing\n"
+    "- MT103, MT202, MT910 → SWIFT message types in PP\n"
+    "- pacs.008, pain.001, camt.053 → ISO 20022 message processing\n"
+    "- Cheque / teller → Cheque collection and clearing\n"
+    "- Nostro / Vostro → Correspondent banking accounts\n\n"
     "DOCUMENT DETECTION:\n"
     "If the user's input contains a REQUIREMENT DOCUMENT, BRD, specification, or detailed "
     "interface description (signs: numbered sections, step-by-step flows, in-scope/out-of-scope, "
@@ -643,6 +653,11 @@ def _build_search_queries_from_text(question):
     q = question.lower()
     queries = []
 
+    banking_codes = re.findall(r'\b(?:MT\d{3}|[0-9]{2}[A-Za-z]|field\s+\d+[a-z]?|tag\s+\d+[a-z]?|PP\.[A-Z.]+|pacs\.\d+|pain\.\d+|camt\.\d+)\b', question, re.IGNORECASE)
+    if banking_codes:
+        for code in banking_codes[:2]:
+            queries.append(f"{code} SWIFT payment charges field")
+
     payment_terms = []
     if any(w in q for w in ["international", "cross-border", "forex", "exchange"]):
         payment_terms.append("international payment cross-border exchange rate")
@@ -662,13 +677,19 @@ def _build_search_queries_from_text(question):
         payment_terms.append("payment initiation fund transfer outward")
     if any(w in q for w in ["workflow", "flow", "process", "step"]):
         payment_terms.append("payment processing workflow configuration")
+    if any(w in q for w in ["charge", "fee", "commission", "71g", "71f", "our", "ben", "sha"]):
+        payment_terms.append("charges fees OUR BEN SHA receiver sender 71G 71F")
+    if any(w in q for w in ["cheque", "check", "collection", "teller"]):
+        payment_terms.append("cheque collection teller processing")
+    if any(w in q for w in ["nostro", "vostro", "suspense", "account"]):
+        payment_terms.append("nostro vostro suspense account clearing")
 
     if payment_terms:
-        queries = payment_terms[:4]
-    else:
-        queries = [question[:150]]
+        queries.extend(payment_terms[:4])
 
-    return queries
+    queries.append(question[:150])
+
+    return queries[:5]
 
 
 def run_orchestrator(api_key, provider, question):
