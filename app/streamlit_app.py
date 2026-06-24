@@ -28,7 +28,6 @@ STOP_WORDS = {
     "your", "i", "provide", "generate", "create", "give", "show", "list",
     "explain", "describe", "tell", "write", "make", "find", "get", "use",
     "test", "cases", "case", "work", "works", "working", "does",
-    "temenos", "tph", "payments", "hub", "payment",
     "possible", "using", "different", "used", "like", "want", "new",
     "based", "through", "between", "within", "after", "before",
     "specific", "available", "required", "related", "existing",
@@ -374,6 +373,11 @@ PAYMENT_TERM_MAP = {
     # TPH codes
     "pp.insuffoutb": "PP insufficient outbound charges OUR 71G",
     "insuffoutb": "insufficient outbound charges OUR 71G payment",
+    # TPH status general terms
+    "status": "TPH payment processing status code lifecycle 100 150 230 600 677 687 996 997 999",
+    "status code": "TPH payment processing status code lifecycle 100 150 230 600 677 687 996 997 999",
+    "status codes": "TPH payment processing status code lifecycle 100 150 230 600 677 687 996 997 999",
+    "tph status": "TPH payment processing status code lifecycle 100 initiated 150 approval 230 clearing 600 settled 677 waiting ACK 687 reversed 996 cancelled 997 rejected 999 completed",
     # TPH Payment Status Codes
     "status 15": "TPH payment status code 15 sent to auto enrichment engine",
     "status 100": "TPH payment status code 100 initiated pending processing",
@@ -461,6 +465,7 @@ def map_to_payment_terms(query):
                 "beneficiary", "payer", "account", "bank", "swift", "sepa",
                 "initiation", "collection", "reversal", "return", "cancel",
                 "outward", "inward", "nostro", "vostro", "correspondent",
+                "status", "tph", "temenos", "pp", "pi", "db",
             ]
         ),
     }
@@ -854,6 +859,8 @@ def _build_search_queries_from_text(question):
         payment_terms.append("cheque collection teller processing")
     if any(w in q for w in ["nostro", "vostro", "suspense", "account"]):
         payment_terms.append("nostro vostro suspense account clearing")
+    if any(w in q for w in ["status", "status code", "lifecycle", "processing stage"]):
+        payment_terms.append("payment status code 100 150 230 600 677 687 996 997 999 lifecycle")
 
     if payment_terms:
         queries.extend(payment_terms[:4])
