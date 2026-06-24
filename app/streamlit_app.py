@@ -890,6 +890,11 @@ def run_orchestrator(api_key, provider, question):
         ptm_queries.append(ptm["payment_context"][:200])
     fallback_queries = _build_search_queries_from_text(question)
 
+    if ptm["matched_terms"]:
+        safe_rewrite = question + " [" + "; ".join(ptm["matched_terms"]) + "]"
+    else:
+        safe_rewrite = question
+
     if result_text:
         try:
             clean = result_text.strip()
@@ -904,9 +909,15 @@ def run_orchestrator(api_key, provider, question):
             confidence = max(result.get("confidence", 85), 85)
             if ptm["is_payment_query"]:
                 confidence = max(confidence, 90)
+
+            if ptm["matched_terms"]:
+                rewritten = safe_rewrite
+            else:
+                rewritten = result.get("rewritten", question[:200])
+
             return {
-                "original": result.get("original", question[:200]),
-                "rewritten": result.get("rewritten", question[:200]),
+                "original": question[:200],
+                "rewritten": rewritten,
                 "intent": result.get("intent", _detect_intent_from_text(question)),
                 "has_document": result.get("has_document", len(question) > 500),
                 "search_queries": combined_queries,
@@ -924,7 +935,7 @@ def run_orchestrator(api_key, provider, question):
 
     return {
         "original": question[:200],
-        "rewritten": enriched[:300] if ptm["matched_terms"] else question[:200],
+        "rewritten": safe_rewrite,
         "intent": intent,
         "has_document": has_doc,
         "search_queries": combined_queries,
