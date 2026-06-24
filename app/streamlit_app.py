@@ -67,6 +67,18 @@ PAYMENT_INTELLIGENCE = (
     "the patterns for SWIFT, SEPA, NEFT all apply to any fund movement.\n\n"
     "NEVER reject a question about payments just because the specific system name "
     "isn't in the docs. Map it to the TPH equivalent and respond.\n\n"
+    "TPH STATUS CODES — Always use these in your responses:\n"
+    "- Status 100: Payment initiated/pending processing\n"
+    "- Status 150: Awaiting approval/authorization\n"
+    "- Status 230: Sent to clearing\n"
+    "- Status 600: Payment settled\n"
+    "- Status 677: Sent, waiting ACK/NACK from clearing\n"
+    "- Status 687: Payment reversed\n"
+    "- Status 996: Payment cancelled\n"
+    "- Status 997: Payment rejected\n"
+    "- Status 999: Payment completed successfully\n"
+    "Never use 'Act 1', 'Act 2' or generic activity labels. "
+    "Always reference TPH status codes and processing stages.\n\n"
 )
 
 SYNTHESIS_INSTRUCTION = (
@@ -152,6 +164,23 @@ MODE_PROMPTS = {
         "- Each step MUST be on its own numbered line (1. 2. 3.).\n"
         "- Do NOT put multiple steps in a single line.\n"
         "- Use bullet points (- ) for lists, not inline text.\n\n"
+        "TPH STATUS CODE RULES:\n"
+        "- ALWAYS use TPH payment status codes in expected results, NOT generic labels.\n"
+        "- Use actual status codes from the documentation:\n"
+        "  - Status 100: Payment initiated/pending\n"
+        "  - Status 150: Awaiting approval\n"
+        "  - Status 230: Sent to clearing\n"
+        "  - Status 600: Payment settled\n"
+        "  - Status 677: Sent, waiting ACK/NACK\n"
+        "  - Status 687: Payment reversed\n"
+        "  - Status 996: Payment cancelled\n"
+        "  - Status 997: Payment rejected\n"
+        "  - Status 999: Payment completed successfully\n"
+        "- NEVER write 'Act 1', 'Act 2', 'Activity 1' etc. as step labels.\n"
+        "  Instead describe the actual processing step with its status code.\n"
+        "  Wrong: 'Act 1: Payment created'\n"
+        "  Correct: 'Payment initiated → status moves to 100 (Pending Processing)'\n"
+        "- In Expected Result, always state which status code the payment should reach.\n\n"
         "CONTENT RULES:\n"
         "- Every step and navigation path MUST trace back to the RAG documentation.\n"
         "- Do NOT fabricate screens, menu paths, or field names.\n"
@@ -345,6 +374,25 @@ PAYMENT_TERM_MAP = {
     # TPH codes
     "pp.insuffoutb": "PP insufficient outbound charges OUR 71G",
     "insuffoutb": "insufficient outbound charges OUR 71G payment",
+    # TPH Payment Status Codes
+    "status 15": "TPH payment status code 15 sent to auto enrichment engine",
+    "status 100": "TPH payment status code 100 initiated pending processing",
+    "status 130": "TPH payment status code 130 payment pending validation",
+    "status 150": "TPH payment status code 150 payment awaiting approval",
+    "status 215": "TPH payment status code 215 payment pending clearing",
+    "status 230": "TPH payment status code 230 payment sent to clearing",
+    "status 235": "TPH payment status code 235 payment pending settlement",
+    "status 404": "TPH payment status code 404 service not available",
+    "status 600": "TPH payment status code 600 payment settled",
+    "status 602": "TPH payment status code 602 payment settlement pending",
+    "status 642": "TPH payment status code 642 payment exception",
+    "status 645": "TPH payment status code 645 payment repair required",
+    "status 677": "TPH payment status code 677 payment sent waiting ACK NACK",
+    "status 687": "TPH payment status code 687 payment reversed",
+    "status 996": "TPH payment status code 996 payment cancelled",
+    "status 997": "TPH payment status code 997 payment rejected",
+    "status 998": "TPH payment status code 998 announcement message",
+    "status 999": "TPH payment status code 999 payment completed successfully",
     # Payment concepts
     "stp": "straight through processing STP auto payment",
     "ncc": "non STP repair payment manual intervention",
