@@ -70,6 +70,9 @@ PAYMENT_INTELLIGENCE = (
     "- NEVER generate a 'User Query:' in your response. The user already asked their question.\n"
     "- NEVER rephrase, reinterpret, or create a different question than what was asked.\n"
     "- NEVER mention clearing systems, countries, or modules that the user did NOT ask about.\n"
+    "- If the user's question is GENERIC (no country/clearing mentioned), answer using "
+    "ONLY generic TPH/PP documentation. Do NOT reference country-specific documents "
+    "(e.g. Nordic, FedNow, SEPA, NEFT). Use the core Payments Hub (PP) documentation only.\n"
     "- Answer EXACTLY and ONLY what the user asked. Nothing more.\n"
     "- If the user asks to 'list' something, provide a list — not a narrative.\n\n"
     "TPH STATUS CODES — Always use these in your responses:\n"
@@ -435,6 +438,27 @@ PAYMENT_TERM_MAP = {
 }
 
 
+COUNTRY_TERMS = {
+    "india", "indian", "neft", "ifrtgs",
+    "uk", "united kingdom", "british", "faster payments", "chaps", "bacs", "fps",
+    "europe", "european", "sepa", "target2", "tips", "equens", "sic",
+    "australia", "australian", "becs", "bpay", "aurtgs",
+    "usa", "united states", "american", "fednow", "fedwire",
+    "argentina", "argentine", "coelsa", "debin",
+    "sri lanka", "sri lankan", "cefts", "slips", "lkrtgs",
+    "hong kong", "hongkong", "hk-fps", "chats",
+    "israel", "israeli", "masav",
+    "lebanon", "lebanese",
+    "africa", "african", "systac", "sibtel", "sygma",
+    "tunisia", "tunisian",
+    "nordic", "iberpay", "spanish",
+    "saudi", "saudi arabia",
+    "canada", "canadian", "interac",
+    "brazil", "brazilian", "pix",
+    "germany", "german", "rps",
+}
+
+
 def map_to_payment_terms(query):
     """Agent 0: Payment Term Mapper — runs BEFORE everything else.
     Maps any raw query to banking/payment terms. No LLM call needed."""
@@ -448,6 +472,8 @@ def map_to_payment_terms(query):
         if re.search(pattern, q_lower):
             mapped_terms.append(expansion)
             original_terms.append(term)
+
+    has_country = any(c in q_lower for c in COUNTRY_TERMS)
 
     enriched_query = query
     if mapped_terms:
@@ -464,6 +490,7 @@ def map_to_payment_terms(query):
         "matched_terms": original_terms,
         "payment_context": " ".join(mapped_terms) if mapped_terms else "",
         "search_boost_terms": search_enrichments,
+        "has_country": has_country,
         "is_payment_query": len(mapped_terms) > 0 or any(
             w in q_lower for w in [
                 "payment", "transfer", "debit", "credit", "charge", "fee",
@@ -545,7 +572,18 @@ def load_knowledge_base():
     return model, chunks, embeddings, search_texts
 
 
-def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K):
+COUNTRY_DOC_PATTERNS = [
+    "clearing_rtgs__africa", "clearing_rtgs__argentina", "clearing_rtgs__australia",
+    "clearing_rtgs__brazil", "clearing_rtgs__canada", "clearing_rtgs__europe",
+    "clearing_rtgs__hong", "clearing_rtgs__india", "clearing_rtgs__israel",
+    "clearing_rtgs__lebanon", "clearing_rtgs__saudi", "clearing_rtgs__sri",
+    "clearing_rtgs__united", "clearing_rtgs__nordic",
+    "request_to_pay__eba", "request_to_pay__rtp_uk", "request_to_pay__saips",
+    "request_to_pay__united",
+]
+
+
+def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K, filter_country=False):
     key_terms = extract_key_terms(query)
 
     query_emb = model.encode([query])
@@ -584,6 +622,16 @@ def retrieve_context(model, chunks, embeddings, search_texts, query, top_k=TOP_K
             min_match = 0.4
         results = [r for r in results if r[3] >= min_match]
         results.sort(key=lambda r: (r[3], r[1]), reverse=True)
+
+    if filter_country:
+        generic_results = []
+        for r in results:
+            doc_id = chunks[r[0]].get("doc_id", "").lower()
+            is_country_doc = any(pat in doc_id for pat in COUNTRY_DOC_PATTERNS)
+            if not is_country_doc:
+                generic_results.append(r)
+        if generic_results:
+            results = generic_results
 
     results = results[:top_k]
 
@@ -935,6 +983,7 @@ def run_orchestrator(api_key, provider, question):
                 "confidence": confidence,
                 "reasoning": result.get("reasoning", "Payment domain query"),
                 "payment_terms": ptm["matched_terms"],
+                "has_country": ptm["has_country"],
             }
         except (json.JSONDecodeError, IndexError, ValueError):
             pass
@@ -953,6 +1002,7 @@ def run_orchestrator(api_key, provider, question):
         "confidence": confidence,
         "reasoning": f"Payment terms identified: {', '.join(ptm['matched_terms'])}" if ptm["matched_terms"] else "Payment domain query — intelligent routing",
         "payment_terms": ptm["matched_terms"],
+        "has_country": ptm["has_country"],
     }
 
 
@@ -1149,6 +1199,7 @@ def main():
                 reasoning = orch["reasoning"]
 
                 has_document = orch["has_document"]
+                has_country = orch.get("has_country", False)
 
                 if mode_override == "Auto-detect":
                     mode = INTENT_TO_MODE.get(detected_intent, "Payment Consultant")
@@ -1212,8 +1263,9 @@ def main():
                 all_contexts = []
                 all_sources = []
                 seen = set()
+                skip_country = not has_country
                 for sq in search_queries:
-                    ctx, srcs = retrieve_context(model, chunks, embeddings, search_texts, sq, top_k=6)
+                    ctx, srcs = retrieve_context(model, chunks, embeddings, search_texts, sq, top_k=6, filter_country=skip_country)
                     if ctx:
                         for chunk_text in ctx.split("\n\n---\n\n"):
                             h = hash(chunk_text[:100])
