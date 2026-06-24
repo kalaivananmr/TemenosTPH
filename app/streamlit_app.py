@@ -295,6 +295,129 @@ NO_INFO_MSG = (
 )
 
 
+PAYMENT_TERM_MAP = {
+    # SWIFT fields
+    "71g": "SWIFT field 71G receiver's charges OUR BEN SHA payment charges PP",
+    "71f": "SWIFT field 71F sender's charges payment charges fees",
+    "32a": "SWIFT field 32A value date currency amount",
+    "33b": "SWIFT field 33B currency instructed amount",
+    "50k": "SWIFT field 50K ordering customer payer details",
+    "50a": "SWIFT field 50A ordering institution",
+    "52a": "SWIFT field 52A ordering institution BIC",
+    "53a": "SWIFT field 53A sender's correspondent",
+    "54a": "SWIFT field 54A receiver's correspondent",
+    "56a": "SWIFT field 56A intermediary institution",
+    "57a": "SWIFT field 57A account with institution beneficiary bank",
+    "59": "SWIFT field 59 beneficiary customer",
+    "59a": "SWIFT field 59A beneficiary customer",
+    "70": "SWIFT field 70 remittance information",
+    "72": "SWIFT field 72 sender to receiver information",
+    "77b": "SWIFT field 77B regulatory reporting",
+    "23e": "SWIFT field 23E instruction code",
+    # SWIFT message types
+    "mt103": "SWIFT MT103 single customer credit transfer outward payment",
+    "mt202": "SWIFT MT202 financial institution transfer cover payment",
+    "mt202cov": "SWIFT MT202COV cover payment",
+    "mt910": "SWIFT MT910 confirmation of credit",
+    "mt940": "SWIFT MT940 customer statement",
+    "mt950": "SWIFT MT950 statement message",
+    "mt199": "SWIFT MT199 free format message",
+    "mt192": "SWIFT MT192 cancellation request",
+    "mt196": "SWIFT MT196 cancellation answer",
+    "mt900": "SWIFT MT900 confirmation of debit",
+    # ISO 20022
+    "pacs.008": "ISO 20022 pacs.008 FI to FI customer credit transfer",
+    "pacs.009": "ISO 20022 pacs.009 FI to FI financial institution credit transfer",
+    "pacs.002": "ISO 20022 pacs.002 payment status report",
+    "pacs.004": "ISO 20022 pacs.004 payment return",
+    "pacs.028": "ISO 20022 pacs.028 FI to FI payment status request",
+    "pain.001": "ISO 20022 pain.001 customer credit transfer initiation",
+    "pain.002": "ISO 20022 pain.002 customer payment status report",
+    "pain.008": "ISO 20022 pain.008 customer direct debit initiation",
+    "camt.053": "ISO 20022 camt.053 bank to customer statement",
+    "camt.054": "ISO 20022 camt.054 bank to customer debit credit notification",
+    "camt.056": "ISO 20022 camt.056 FI to FI payment cancellation request",
+    "camt.029": "ISO 20022 camt.029 resolution of investigation",
+    # Charge types
+    "our": "charge type OUR all charges borne by sender",
+    "ben": "charge type BEN all charges borne by beneficiary",
+    "sha": "charge type SHA shared charges between sender and receiver",
+    # TPH codes
+    "pp.insuffoutb": "PP insufficient outbound charges OUR 71G",
+    "insuffoutb": "insufficient outbound charges OUR 71G payment",
+    # Payment concepts
+    "stp": "straight through processing STP auto payment",
+    "ncc": "non STP repair payment manual intervention",
+    "ofs": "open financial services OFS T24 Transact message",
+    "bic": "bank identifier code SWIFT BIC payment routing",
+    "iban": "international bank account number IBAN",
+    "sort code": "UK sort code bank branch identifier",
+    "clearing": "clearing system settlement payment processing",
+    "nostro": "nostro account correspondent banking outward",
+    "vostro": "vostro account correspondent banking inward",
+    "gpi": "SWIFT gpi global payments innovation tracker",
+    "uetr": "unique end-to-end transaction reference SWIFT gpi",
+    "sanctions": "sanctions screening compliance AML payment",
+    "aml": "anti money laundering compliance screening",
+    "kyc": "know your customer compliance",
+    "fx": "foreign exchange rate currency conversion",
+    "forex": "foreign exchange rate currency conversion",
+    "netting": "payment netting bilateral multilateral",
+    "cutoff": "cut-off time payment processing window",
+    "cut-off": "cut-off time payment processing window",
+    "value date": "value date settlement date payment processing",
+    "exposure": "exposure date future dated payment",
+    "mandate": "direct debit mandate authorization",
+    "dd": "direct debit collection mandate",
+    "standing order": "standing order recurring payment instruction",
+    "bulk": "bulk payment batch processing upload",
+    "teller": "teller branch initiated payment transaction",
+    "cheque": "cheque check collection clearing instrument",
+    "check": "cheque check collection clearing instrument",
+}
+
+
+def map_to_payment_terms(query):
+    """Agent 0: Payment Term Mapper — runs BEFORE everything else.
+    Maps any raw query to banking/payment terms. No LLM call needed."""
+
+    q_lower = query.lower()
+    mapped_terms = []
+    original_terms = []
+
+    for term, expansion in PAYMENT_TERM_MAP.items():
+        pattern = r'\b' + re.escape(term) + r'\b'
+        if re.search(pattern, q_lower):
+            mapped_terms.append(expansion)
+            original_terms.append(term)
+
+    enriched_query = query
+    if mapped_terms:
+        enriched_query = query + "\n\n[Payment Terms Identified: " + "; ".join(mapped_terms) + "]"
+
+    search_enrichments = []
+    for expansion in mapped_terms:
+        words = expansion.split()
+        search_enrichments.extend(words)
+    search_enrichments = list(dict.fromkeys(search_enrichments))
+
+    return {
+        "enriched_query": enriched_query,
+        "matched_terms": original_terms,
+        "payment_context": " ".join(mapped_terms) if mapped_terms else "",
+        "search_boost_terms": search_enrichments,
+        "is_payment_query": len(mapped_terms) > 0 or any(
+            w in q_lower for w in [
+                "payment", "transfer", "debit", "credit", "charge", "fee",
+                "clearing", "settlement", "transaction", "fund", "remittance",
+                "beneficiary", "payer", "account", "bank", "swift", "sepa",
+                "initiation", "collection", "reversal", "return", "cancel",
+                "outward", "inward", "nostro", "vostro", "correspondent",
+            ]
+        ),
+    }
+
+
 def extract_key_terms(query):
     query_lower = query.lower()
 
@@ -693,13 +816,24 @@ def _build_search_queries_from_text(question):
 
 
 def run_orchestrator(api_key, provider, question):
+    # === AGENT 0: Payment Term Mapper (ALWAYS runs first, no LLM) ===
+    ptm = map_to_payment_terms(question)
+    enriched = ptm["enriched_query"]
+
+    # === AGENT 1: LLM Orchestrator (uses enriched query) ===
     result_text = ""
     try:
         result_text = call_llm_once(
-            api_key, provider, ORCHESTRATOR_PROMPT, question[:4000],
+            api_key, provider, ORCHESTRATOR_PROMPT, enriched[:5000],
         )
     except Exception:
         result_text = ""
+
+    # Build search queries from payment mapper + fallback
+    ptm_queries = []
+    if ptm["payment_context"]:
+        ptm_queries.append(ptm["payment_context"][:200])
+    fallback_queries = _build_search_queries_from_text(question)
 
     if result_text:
         try:
@@ -710,30 +844,38 @@ def run_orchestrator(api_key, provider, question):
             if json_match:
                 clean = json_match.group(0)
             result = json.loads(clean)
+            llm_queries = result.get("search_queries", [])
+            combined_queries = list(dict.fromkeys(ptm_queries + llm_queries + fallback_queries))[:5]
+            confidence = max(result.get("confidence", 85), 85)
+            if ptm["is_payment_query"]:
+                confidence = max(confidence, 90)
             return {
                 "original": result.get("original", question[:200]),
                 "rewritten": result.get("rewritten", question[:200]),
                 "intent": result.get("intent", _detect_intent_from_text(question)),
                 "has_document": result.get("has_document", len(question) > 500),
-                "search_queries": result.get("search_queries", _build_search_queries_from_text(question)),
-                "confidence": max(result.get("confidence", 85), 85),
-                "reasoning": result.get("reasoning", "Payment domain query — proceeding"),
+                "search_queries": combined_queries,
+                "confidence": confidence,
+                "reasoning": result.get("reasoning", "Payment domain query"),
+                "payment_terms": ptm["matched_terms"],
             }
         except (json.JSONDecodeError, IndexError, ValueError):
             pass
 
     has_doc = len(question) > 500
     intent = _detect_intent_from_text(question)
-    search_queries = _build_search_queries_from_text(question)
+    combined_queries = list(dict.fromkeys(ptm_queries + fallback_queries))[:5]
+    confidence = 90 if ptm["is_payment_query"] else 85
 
     return {
         "original": question[:200],
-        "rewritten": question[:200],
+        "rewritten": enriched[:300] if ptm["matched_terms"] else question[:200],
         "intent": intent,
         "has_document": has_doc,
-        "search_queries": search_queries,
-        "confidence": 85,
-        "reasoning": "Payment domain query — using intelligent fallback routing",
+        "search_queries": combined_queries,
+        "confidence": confidence,
+        "reasoning": f"Payment terms identified: {', '.join(ptm['matched_terms'])}" if ptm["matched_terms"] else "Payment domain query — intelligent routing",
+        "payment_terms": ptm["matched_terms"],
     }
 
 
@@ -892,6 +1034,7 @@ def main():
         - 🧪 **Test Cases** — Generate test scenarios
 
         **Agent Pipeline:**
+        0. 🏦 **Payment Mapper** — Maps terms to banking concepts (no LLM)
         1. 🧠 **Orchestrator** — Rewrites query in TPH context, picks mode
         2. 🛡️ **Validator** — Checks context relevance
         3. 💬 **Responder** — Generates verified answer
@@ -935,6 +1078,9 @@ def main():
                 else:
                     mode = mode_override
 
+                payment_terms_found = orch.get("payment_terms", [])
+                if payment_terms_found:
+                    st.write(f"**🏦 Payment terms identified:** `{'`, `'.join(payment_terms_found)}`")
                 st.write(f"**Rewritten query:** {rewritten}")
                 doc_label = " | 📄 Document provided" if has_document else ""
                 st.write(f"**Mode:** {mode} | **Confidence:** {confidence}%{doc_label}")
