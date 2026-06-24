@@ -66,6 +66,12 @@ PAYMENT_INTELLIGENCE = (
     "the patterns for SWIFT, SEPA, NEFT all apply to any fund movement.\n\n"
     "NEVER reject a question about payments just because the specific system name "
     "isn't in the docs. Map it to the TPH equivalent and respond.\n\n"
+    "ANTI-HALLUCINATION RULES:\n"
+    "- NEVER generate a 'User Query:' in your response. The user already asked their question.\n"
+    "- NEVER rephrase, reinterpret, or create a different question than what was asked.\n"
+    "- NEVER mention clearing systems, countries, or modules that the user did NOT ask about.\n"
+    "- Answer EXACTLY and ONLY what the user asked. Nothing more.\n"
+    "- If the user asks to 'list' something, provide a list — not a narrative.\n\n"
     "TPH STATUS CODES — Always use these in your responses:\n"
     "- Status 100: Payment initiated/pending processing\n"
     "- Status 150: Awaiting approval/authorization\n"
@@ -810,7 +816,12 @@ def validate_context(api_key, provider, context, question):
 
 
 def stream_response(api_key, provider, system_prompt, context, question):
-    user_prompt = f"Documentation context:\n\n{context}\n\n---\nQuestion: {question}"
+    user_prompt = (
+        f"Documentation context:\n\n{context}\n\n---\n"
+        f"IMPORTANT: Answer ONLY the following question. Do NOT create a different question. "
+        f"Do NOT write 'User Query:' in your response. Do NOT mention topics the user did not ask about.\n\n"
+        f"Question: {question}"
+    )
     yield from call_llm(api_key, provider, system_prompt, user_prompt, temperature=0.1, max_tokens=2048, stream=True)
 
 
